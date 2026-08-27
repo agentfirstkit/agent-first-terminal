@@ -6,13 +6,16 @@ from __future__ import annotations
 import base64
 import json
 import os
-import selectors
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import smoke_support  # noqa: E402
 
 
 TOKEN = "terminal-smoke-0123456789-abcdefghijkl"
@@ -155,28 +158,26 @@ def request_text(api_url: str, path: str) -> tuple[int, str]:
 def wait_for_ready(process: subprocess.Popen[str]) -> dict[str, object]:
     if process.stdout is None:
         raise RuntimeError("afterminal stdout is unavailable")
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
+    reader = smoke_support.LineReader(process)
     deadline = time.monotonic() + 15
     lines: list[str] = []
     while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise RuntimeError(
-                f"afterminal exited before ready ({process.returncode}): {' | '.join(lines)}"
-            )
-        for key, _ in selector.select(timeout=0.25):
-            line = key.fileobj.readline()
-            if not line:
-                continue
-            lines.append(line.rstrip())
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            progress = event.get("progress", {})
-            if event.get("kind") == "progress" and progress.get("phase") == "api_ready":
-                if isinstance(progress.get("api_url"), str):
-                    return progress
+        line = reader.next_line(0.25)
+        if line is None:
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"afterminal exited before ready ({process.returncode}): {' | '.join(lines)}"
+                )
+            continue
+        lines.append(line.rstrip())
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        progress = event.get("progress", {})
+        if event.get("kind") == "progress" and progress.get("phase") == "api_ready":
+            if isinstance(progress.get("api_url"), str):
+                return progress
     raise RuntimeError(f"timed out waiting for API readiness: {' | '.join(lines)}")
 
 
@@ -210,7 +211,7 @@ def secret_input_never_leaves_the_runtime(api_url: str) -> None:
         api_url,
         "POST",
         "/v1/sessions",
-        {"session_id": session_id, "program": "/bin/sh"},
+        {"session_id": session_id, "program": smoke_support.shell_program()},
     )
     if status != 200 or result.get("secret_input") is not False:
         raise RuntimeError(f"open secret session failed: {status} {result}")
@@ -437,7 +438,7 @@ def main() -> int:
                 "/v1/sessions",
                 {
                     "session_id": session_id,
-                    "program": "/bin/sh",
+                    "program": smoke_support.shell_program(),
                     "rows": 24,
                     "cols": 80,
                 },
@@ -549,7 +550,7 @@ def main() -> int:
             "/v1/sessions",
             {
                 "session_id": signal_session_id,
-                "program": "/bin/sh",
+                "program": smoke_support.shell_program(),
                 "args": [
                     "-c",
                     "trap 'printf \"EXTERNAL_INTERRUPTED\\n\"; exit 0' INT; "

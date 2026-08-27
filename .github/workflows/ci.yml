@@ -109,3 +109,16 @@ jobs:
           afdata validate version.jsonl --strict
           afdata validate ui-help.jsonl --strict
           afdata validate api-help.jsonl --strict
+
+      # The end-to-end flows, driving the real binary: the HTTP API against a
+      # live PTY, a window delivered to a stub browser, and a nested session
+      # inheriting delivery rather than opening a second window. This is the
+      # platform where the runtime is least like the one it was written on, so
+      # it is the platform where running them matters most.
+      - name: API, window and delivery smokes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/api_smoke.py target/release/afterminal.exe
+          python3 tests/ui_smoke.py target/release/afterminal.exe
+          python3 tests/ui_delivery_smoke.py target/release/afterminal.exe

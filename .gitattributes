@@ -1,7 +1,1 @@
-# The UI runtime is embedded into the binary and served as-is, and the page
-# splices in a pinned script. Bytes that depend on which platform checked the
-# repository out would make "pinned" a per-platform claim, so line endings are
-# fixed here rather than left to a client's `core.autocrlf`.
 * text=auto eol=lf
-*.png binary
-*.ico binary

@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import json
 import os
-import selectors
-import shlex
 import signal
-import stat
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import smoke_support  # noqa: E402
 import time
 import urllib.request
 from pathlib import Path
@@ -21,27 +22,23 @@ TOKEN = "terminal-delivery-smoke-0123456789-abcd"
 
 
 def read_ready(process: subprocess.Popen[str], timeout: float) -> dict:
-    if process.stdout is None:
-        raise RuntimeError("afterminal stdout is unavailable")
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
+    reader = smoke_support.LineReader(process)
     deadline = time.monotonic() + timeout
     lines: list[str] = []
     while time.monotonic() < deadline:
-        for key, _ in selector.select(timeout=0.25):
-            line = key.fileobj.readline()
-            if not line:
-                continue
-            lines.append(line.rstrip())
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            progress = event.get("progress", {})
-            if event.get("kind") == "progress" and progress.get("phase") == "ui_ready":
-                return progress
-        if process.poll() is not None:
-            break
+        line = reader.next_line(0.25)
+        if line is None:
+            if process.poll() is not None:
+                break
+            continue
+        lines.append(line.rstrip())
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        progress = event.get("progress", {})
+        if event.get("kind") == "progress" and progress.get("phase") == "ui_ready":
+            return progress
     raise RuntimeError(f"outer terminal never became ready: {' | '.join(lines)}")
 
 
@@ -87,35 +84,30 @@ def main() -> int:
         workspace = Path(temporary)
         config_dir = workspace / "afui-config"
         browser_called = workspace / "browser-called"
-        browser = workspace / "unexpected-browser"
-        browser.write_text(
-            f"#!/bin/sh\nset -eu\ntouch {shlex.quote(str(browser_called))}\n",
-            encoding="utf-8",
+        browser = smoke_support.write_marker_launcher(
+            workspace, "unexpected-browser", browser_called
         )
-        browser.chmod(browser.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP)
 
-        inner = " ".join(
-            shlex.quote(value)
-            for value in [
+        launch_inner = smoke_support.write_command_launcher(
+            workspace,
+            "launch-inner",
+            [
                 binary,
                 "ui",
                 "inner",
                 "--port",
                 "0",
                 "--program",
-                "/bin/sh",
+                smoke_support.shell_program(),
                 "--title",
                 "inherited-inner",
-            ]
+            ],
         )
-        launch_inner = workspace / "launch-inner"
-        launch_inner.write_text(f"#!/bin/sh\nexec {inner}\n", encoding="utf-8")
-        launch_inner.chmod(launch_inner.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP)
         environment = os.environ.copy()
         environment.update(
             {
                 "AFTERMINAL_API_ACCESS_TOKEN_SECRET": TOKEN,
-                "AFUI_BROWSER_BINARY": str(browser),
+                "AFUI_BROWSER_BINARY": browser,
                 "AFUI_CONFIG_DIR": str(config_dir),
             }
         )
@@ -130,7 +122,7 @@ def main() -> int:
                 "--port",
                 "0",
                 "--program",
-                str(launch_inner),
+                launch_inner,
                 "--title",
                 "inherited-outer",
             ],

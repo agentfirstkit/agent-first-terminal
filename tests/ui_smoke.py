@@ -11,14 +11,16 @@ from __future__ import annotations
 
 import json
 import os
-import selectors
-import stat
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import smoke_support  # noqa: E402
 
 
 TOKEN = "terminal-ui-smoke-0123456789-abcdefg"
@@ -98,31 +100,31 @@ def request(api_url: str, path: str, *, authenticated: bool) -> tuple[int, objec
         return 0, None
 
 
-def read_events(process: subprocess.Popen[str], phase: str, timeout: float) -> tuple[dict, list[str]]:
+def read_events(
+    reader: smoke_support.LineReader,
+    process: subprocess.Popen[str],
+    phase: str,
+    timeout: float,
+) -> tuple[dict, list[str]]:
     """Consume stdout until an event with `phase` arrives."""
-    if process.stdout is None:
-        raise RuntimeError("afterminal stdout is unavailable")
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
     deadline = time.monotonic() + timeout
     lines: list[str] = []
     while time.monotonic() < deadline:
-        if process.poll() is not None and not selector.select(timeout=0):
-            raise RuntimeError(
-                f"afterminal exited before {phase} ({process.returncode}): {' | '.join(lines)}"
-            )
-        for key, _ in selector.select(timeout=0.25):
-            line = key.fileobj.readline()
-            if not line:
-                continue
-            lines.append(line.rstrip())
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            progress = event.get("progress", {})
-            if event.get("kind") == "progress" and progress.get("phase") == phase:
-                return progress, lines
+        line = reader.next_line(0.25)
+        if line is None:
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"afterminal exited before {phase} ({process.returncode}): {' | '.join(lines)}"
+                )
+            continue
+        lines.append(line.rstrip())
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        progress = event.get("progress", {})
+        if event.get("kind") == "progress" and progress.get("phase") == phase:
+            return progress, lines
     raise RuntimeError(f"timed out waiting for {phase}: {' | '.join(lines)}")
 
 
@@ -131,11 +133,10 @@ def main() -> int:
         raise RuntimeError("usage: ui_smoke.py PATH_TO_AFTERMINAL")
     binary = sys.argv[1]
     with tempfile.TemporaryDirectory(prefix="afterminal-ui-smoke-") as workspace:
-        stub_path = os.path.join(workspace, "stub-browser")
         report_path = os.path.join(workspace, "report.json")
-        with open(stub_path, "w", encoding="utf-8") as handle:
-            handle.write(STUB_BROWSER.format(assets=PAGE_ASSETS))
-        os.chmod(stub_path, os.stat(stub_path).st_mode | stat.S_IEXEC | stat.S_IXGRP)
+        stub_path = smoke_support.write_python_launcher(
+            Path(workspace), "stub-browser", STUB_BROWSER.format(assets=PAGE_ASSETS)
+        )
 
         environment = os.environ.copy()
         environment["AFTERMINAL_API_ACCESS_TOKEN_SECRET"] = TOKEN
@@ -151,7 +152,7 @@ def main() -> int:
                 "--port",
                 "0",
                 "--program",
-                "/bin/sh",
+                smoke_support.shell_program(),
                 "--mode",
                 "window",
             ],
@@ -160,8 +161,9 @@ def main() -> int:
             stderr=subprocess.STDOUT,
             text=True,
         )
+        reader = smoke_support.LineReader(process)
         try:
-            ready, lines = read_events(process, "ui_ready", 20)
+            ready, lines = read_events(reader, process, "ui_ready", 20)
             api_url = ready.get("api_url")
             # `mode` is the shape of the `ui` call — a window here, or a session
             # published for somebody who is not. `api_mode` is the listener
@@ -197,8 +199,7 @@ def main() -> int:
             remaining = process.wait(timeout=20)
             if remaining != 0:
                 raise RuntimeError(f"afterminal exited {remaining} after the window closed")
-            trailing = process.stdout.read() if process.stdout else ""
-            lines.extend(trailing.splitlines())
+            lines.extend(reader.drain())
         finally:
             if process.poll() is None:
                 process.terminate()
