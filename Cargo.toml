@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-terminal"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Let your AI agent work in a real terminal you can watch — and take the keyboard back whenever you want, from your phone if you are not at the machine."
 license = "MIT"

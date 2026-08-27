@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-terminal",
   "name": "Agent-First Terminal",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Let your AI agent work in a real terminal you can watch — and take the keyboard back whenever you want, from your phone if you are not at the machine.",
@@ -17,18 +17,9 @@
   ],
   "license": "MIT",
   "mutations": [
-    "First release: a multi-session PTY runtime an agent can drive and a person can watch, with raw fan-out, structured VT screen snapshots, a multiplexed event stream, resize, foreground process-group signals and typed lifecycle operations",
-    "Coordinate several actors on one terminal through shared and exclusive input leases with TTL deadlines, where a person needs no lease and typing immediately revokes an automated exclusive one",
-    "Take secret input without publishing anything derived from it — no raw output, nothing retained for replay, no screen content, and no event carrying the size of what was typed — refusing every non-human actor until a person ends it",
-    "Deliver a trusted DOM-rendered terminal page as a local window, an AFUI-owned LAN link, or a registered AFUI session, and let a command run inside a remotely delivered session publish into the same registry rather than opening a window nobody is at",
-    "Expose the same runtime to programs over a loopback-only bearer-protected HTTP API with a committed, drift-tested OpenAPI 3.2 contract and an SSE stream that resumes from Last-Event-ID",
-    "Keep the core library free of an async runtime, an HTTP dependency and any UI host, so depending on this crate needs no feature and the CLI's api feature is opt-in",
-    "Send a special key only after the text typed before it, so Return no longer reaches the PTY ahead of its own line and Backspace no longer arrives before the character it deletes",
-    "Stop swallowing the first keystroke after an input method commits, which on a Chinese keyboard was the space between two words",
-    "Replace only the screen rows that changed and leave a selection alone when a click ends a drag, so output can be selected and copied while the screen refreshes",
-    "Put the composition field on the cursor and show the text being composed there, so a half-typed word appears where it is typed and an input method's candidate window follows the cursor",
-    "Give the terminal its height back on a phone held sideways, where every responsive rule keyed off width and left under one row once a keyboard opened",
-    "Publish through Homebrew and Scoop alongside crates.io and GitHub Releases"
+    "Answer the cursor-position and status queries a program makes of its terminal (ESC[6n and ESC[5n), reporting the cursor as the screen stands; without this ConPTY emits nothing at all and a Windows session never starts, while the private ESC[?6n form is deliberately left unanswered rather than answered wrongly",
+    "Resolve the default session program per platform: COMSPEC on Windows rather than /bin/sh, and never SHELL there, whose one common value is an MSYS path CreateProcessW cannot resolve",
+    "Run the runtime suites and the API, window and delivery smokes on Windows in continuous integration, so the platform is exercised on every push instead of for the first time during a release"
   ],
   "bonds": [
     {

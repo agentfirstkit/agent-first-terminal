@@ -1187,7 +1187,7 @@
   "info": {
     "description": "A bearer-protected local terminal runtime API for opening, observing, and safely coordinating human and agent control of multiple PTY sessions.",
     "title": "Agent-First Terminal API",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "openapi": "3.2.0",
