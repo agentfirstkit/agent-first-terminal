@@ -1,0 +1,16 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/trace.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "duration_ms": {
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "duration_ms"
+  ],
+  "title": "Trace",
+  "type": "object"
+}

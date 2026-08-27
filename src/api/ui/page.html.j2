@@ -1,0 +1,106 @@
+{#-
+  afterminal's own terminal page, and the reference for anyone replacing it.
+
+  Two things are not this file's to write. `<!-- afterminal:trusted-runtime -->`
+  is where afterminal splices in its own `app.js`;
+  a page without it will not open. And every `id` here comes from
+  `document.elements` rather than being typed out, because those are the
+  elements that runtime binds to — a page that does not produce them is a
+  terminal that opens and does nothing, so afterminal refuses it instead.
+
+  Everything else is yours: reorder it, drop the footer, regroup the controls,
+  rename every heading.
+-#}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  {#- `interactive-widget=resizes-content` asks the browser to shrink the
+      layout when a soft keyboard opens, which is the whole problem on a phone.
+      Chromium honours it; Safari ignores it, so `app.js` also tracks
+      `visualViewport`. Neither is a substitute for the other. -#}
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <title>{{ document.title }}</title>
+  <link rel="icon" href="{{ afui.app_icon_path }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ afui.base_style_path }}">
+  <link rel="stylesheet" href="style.css">
+  <!-- afterminal:trusted-runtime -->
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">{{ document.brand }}</p>
+        <h1>{{ document.heading }}</h1>
+      </div>
+      <div class="connection" role="status" aria-live="polite">
+        <span id="{{ document.elements.connection_dot }}" class="connection-dot"></span>
+        <span id="{{ document.elements.connection_status }}">Connecting</span>
+      </div>
+    </header>
+
+    <nav class="session-rail" aria-label="Terminal sessions">
+      <div class="rail-heading">
+        <span>Sessions</span>
+        <span id="{{ document.elements.session_count }}" class="count">0</span>
+      </div>
+      <div id="{{ document.elements.sessions }}" class="sessions"></div>
+    </nav>
+
+    <main class="workspace">
+      <section id="{{ document.elements.empty_state }}" class="empty-state">
+        <h2>No terminal yet</h2>
+        <p>A terminal will appear here when a command opens one.</p>
+      </section>
+      <section id="{{ document.elements.terminal_panel }}" class="terminal-panel" hidden>
+        <div class="terminal-heading">
+          <div>
+            <h2 id="{{ document.elements.terminal_title }}">Terminal</h2>
+            <p id="{{ document.elements.terminal_meta }}">Human input is active.</p>
+          </div>
+          <div class="terminal-controls">
+            <div class="actions" aria-label="Process controls">
+              <button id="{{ document.elements.key_bar_toggle }}" type="button" class="keys" aria-expanded="false" aria-controls="{{ document.elements.key_bar }}">Keys</button>
+              <button id="{{ document.elements.secret_input }}" type="button" class="secret" aria-pressed="false">Private input</button>
+              {% for signal in document.signals %}{% if not signal.secondary %}<button type="button" class="{{ signal.emphasis }}" data-signal="{{ signal.name }}">{{ signal.label }}</button>{% endif %}
+              {% endfor %}<details class="process-menu">
+                <summary>{{ document.session_menu_label }}</summary>
+                <div class="process-menu-items">
+                  {% for signal in document.signals %}{% if signal.secondary %}<button type="button" class="{{ signal.emphasis }}" data-signal="{{ signal.name }}">{{ signal.label }}</button>{% endif %}
+                  {% endfor %}<button id="{{ document.elements.close_session }}" type="button" class="quiet-danger">Close session</button>
+                </div>
+              </details>
+            </div>
+            <p id="{{ document.elements.activity_status }}" class="activity-status" role="status" aria-live="polite"></p>
+          </div>
+        </div>
+        <div class="terminal-stage">
+          <div id="{{ document.elements.terminal }}" class="terminal" aria-label="Interactive terminal"></div>
+          <div id="{{ document.elements.secret_overlay }}" class="secret-overlay" role="status" aria-live="assertive" hidden>
+            <p class="secret-badge">Private input</p>
+            <h2>Type the secret now</h2>
+            <p class="secret-detail">
+              Your typing and the terminal response stay hidden from automation
+              while this is on. Type as usual; the screen remains blank, like a
+              password prompt.
+            </p>
+            <p id="{{ document.elements.secret_reason }}" class="secret-reason"></p>
+          </div>
+        </div>
+        {#-
+          The keys a soft keyboard does not have. Shown by default wherever the
+          pointer is coarse or the viewport is narrow, and the `Keys` control
+          above overrides that either way — a desktop with a real keyboard
+          should not lose a row to this, and a person on a touchscreen laptop
+          should not be unable to ask for it.
+        -#}
+        <div id="{{ document.elements.key_bar }}" class="key-bar" role="group" aria-label="Terminal keys" hidden>
+          {% for key in document.keys %}<button type="button" class="key {{ key.emphasis }}" data-key="{{ key.name }}" aria-label="{{ key.description }}">{{ key.label }}</button>
+          {% endfor %}
+        </div>
+      </section>
+    </main>
+
+  </div>
+</body>
+</html>

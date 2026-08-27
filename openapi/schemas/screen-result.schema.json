@@ -1,0 +1,293 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/screen-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "activity": {
+      "additionalProperties": false,
+      "properties": {
+        "last_output_age_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "quiescent": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "last_output_age_ms",
+        "quiescent"
+      ],
+      "type": "object"
+    },
+    "alt_screen": {
+      "type": "boolean"
+    },
+    "cells": {
+      "description": "Styled visible cells; empty while secret_input is true",
+      "items": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "background": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "default"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "index": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "kind": {
+                      "const": "indexed"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "index"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "blue": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "green": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "kind": {
+                      "const": "rgb"
+                    },
+                    "red": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "red",
+                    "green",
+                    "blue"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "bold": {
+              "type": "boolean"
+            },
+            "dim": {
+              "type": "boolean"
+            },
+            "foreground": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "default"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "index": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "kind": {
+                      "const": "indexed"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "index"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "blue": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "green": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "kind": {
+                      "const": "rgb"
+                    },
+                    "red": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "red",
+                    "green",
+                    "blue"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "inverse": {
+              "type": "boolean"
+            },
+            "italic": {
+              "type": "boolean"
+            },
+            "text": {
+              "type": "string"
+            },
+            "underline": {
+              "type": "boolean"
+            },
+            "width": {
+              "enum": [
+                1,
+                2
+              ],
+              "type": "integer"
+            }
+          },
+          "required": [
+            "text",
+            "width",
+            "foreground",
+            "background",
+            "bold",
+            "dim",
+            "italic",
+            "underline",
+            "inverse"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "type": "array"
+    },
+    "cols": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "cursor": {
+      "additionalProperties": false,
+      "properties": {
+        "col": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "row": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "visible": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "row",
+        "col",
+        "visible"
+      ],
+      "type": "object"
+    },
+    "lines": {
+      "description": "Empty while secret_input is true: the screen is withheld, not blank",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "modes": {
+      "additionalProperties": false,
+      "properties": {
+        "application_cursor": {
+          "type": "boolean"
+        },
+        "bracketed_paste": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "application_cursor",
+        "bracketed_paste"
+      ],
+      "type": "object"
+    },
+    "rows": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "secret_input": {
+      "description": "True while a person is entering a secret; the rest of this snapshot then describes the session as it was when that window opened",
+      "type": "boolean"
+    },
+    "seq": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "unsupported_extensions": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "seq",
+    "cols",
+    "rows",
+    "title",
+    "cursor",
+    "alt_screen",
+    "lines",
+    "cells",
+    "modes",
+    "unsupported_extensions",
+    "activity",
+    "secret_input"
+  ],
+  "title": "ScreenResult",
+  "type": "object"
+}

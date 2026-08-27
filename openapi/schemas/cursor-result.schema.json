@@ -1,0 +1,25 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/cursor-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "col": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "row": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "visible": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "row",
+    "col",
+    "visible"
+  ],
+  "title": "CursorResult",
+  "type": "object"
+}

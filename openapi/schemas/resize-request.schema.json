@@ -1,0 +1,25 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/resize-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "cols": {
+      "default": 80,
+      "maximum": 1000,
+      "minimum": 2,
+      "type": "integer"
+    },
+    "rows": {
+      "default": 24,
+      "maximum": 1000,
+      "minimum": 2,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "rows",
+    "cols"
+  ],
+  "title": "ResizeRequest",
+  "type": "object"
+}

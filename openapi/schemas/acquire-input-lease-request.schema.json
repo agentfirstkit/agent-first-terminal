@@ -1,0 +1,63 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/acquire-input-lease-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "actor": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "human",
+            "agent",
+            "renderer",
+            "controller",
+            "test",
+            "replay"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "lease_id": {
+      "description": "Existing lease to renew; omit to renew this actor's lease or create one",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mode": {
+      "enum": [
+        "shared",
+        "exclusive"
+      ],
+      "type": "string"
+    },
+    "ttl_ms": {
+      "default": 5000,
+      "maximum": 300000,
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "actor",
+    "mode"
+  ],
+  "title": "AcquireInputLeaseRequest",
+  "type": "object"
+}

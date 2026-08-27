@@ -1,0 +1,644 @@
+:root {
+  /* What the baseline has no opinion about: a terminal's own surface, the two
+     states this page paints (a secret being typed, a session idling), and the
+     chrome and glow this arrangement is drawn on. */
+  --accent-soft: rgba(8, 116, 95, .1);
+  --secret: #975300;
+  --idle: #77828e;
+  --pending: #9b6500;
+  --chrome: rgba(255, 255, 255, .9);
+  --rail: rgba(247, 249, 250, .96);
+  --workspace: rgba(230, 235, 239, .52);
+  --glow: rgba(96, 165, 214, .12);
+  --terminal-bg: #0b0d12;
+  --terminal-ink: #eef1f7;
+  --terminal-muted: #aab2c0;
+  --terminal-cursor: #71e6c2;
+  --terminal-cursor-ink: #0b0d12;
+  --secret-overlay: #120c04;
+  --secret-on: #241503;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent-soft: rgba(113, 230, 194, .09);
+    --secret: #ffb05c;
+    --idle: #6e7787;
+    --pending: #f1cb75;
+    --chrome: rgba(12, 15, 21, .88);
+    --rail: rgba(15, 18, 25, .92);
+    --workspace: rgba(6, 8, 12, .5);
+    --glow: rgba(73, 116, 150, .18);
+  }
+}
+
+/* `--viewport-height` is set by `app.js` from `visualViewport` on the platforms
+   that shrink it for a soft keyboard without resizing the layout viewport. When
+   nothing sets it — every desktop, and any browser without `visualViewport` —
+   this is the plain full-height layout it has always been. */
+html, body { width: 100%; height: var(--viewport-height, 100%); margin: 0; }
+
+body {
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 16% 0%, var(--glow), transparent 32rem),
+    var(--afui-page);
+  color: var(--afui-ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+/* Rows are placed rather than filled, because one of these three can be absent:
+ * inside a frame that draws a head, this page does not draw its own. Left to
+ * auto-placement the rail and the workspace would move up into the `auto` row
+ * the head had, and a terminal whose row is `auto` rather than `1fr` computes
+ * to no height at all — a blank card, from one `display: none`. */
+.shell {
+  display: grid;
+  grid-template: auto minmax(0, 1fr) / 230px minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+}
+
+.topbar {
+  grid-row: 1;
+}
+
+.session-rail {
+  grid-row: 2;
+  grid-column: 1;
+}
+
+.workspace {
+  grid-row: 2;
+  grid-column: 2;
+}
+
+.topbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 76px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--afui-line);
+  background: var(--chrome);
+  backdrop-filter: blur(18px);
+}
+
+/* Inside a frame that draws a head, this page does not draw a second one: the
+ * program's name and the terminal the session is on are already up there, and
+ * the line beside them is this page's, sent up as it changes. Here that is 76
+ * pixels of a screen whose rows are terminal rows. */
+body[data-frame-head="true"] .topbar {
+  display: none;
+}
+
+.eyebrow {
+  margin: 0 0 3px;
+  color: var(--afui-accent);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+
+h1, h2, p { margin-top: 0; }
+h1 { margin-bottom: 0; font-size: 20px; letter-spacing: -.02em; }
+h2 { margin-bottom: 4px; font-size: 16px; }
+
+.connection {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--afui-muted);
+  font-size: 12px;
+}
+
+/* The dot says at a glance what the word beside it says in words, so it is
+ * drawn in whatever colour the AFUI baseline gave that word — `currentColor`
+ * rather than a palette of its own, which is how the two came to disagree
+ * about what "connecting" looks like in the first place. The baseline leaves
+ * `live` and `connecting` plain, so those two are the ones this file answers. */
+.connection-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  color: var(--afui-accent);
+  background: currentColor;
+  box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.connection-dot[data-afui-connection="connecting"] {
+  color: var(--idle);
+}
+
+.session-rail {
+  min-height: 0;
+  padding: 14px 12px;
+  border-right: 1px solid var(--afui-line);
+  background: var(--rail);
+  overflow: auto;
+}
+
+.rail-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 10px;
+  color: var(--afui-muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.count {
+  min-width: 24px;
+  padding: 2px 7px;
+  border: 1px solid var(--afui-line);
+  border-radius: 999px;
+  text-align: center;
+}
+
+.sessions { display: grid; gap: 7px; }
+
+.session {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--afui-ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.session:hover { background: var(--afui-panel); }
+
+.session[data-selected="true"] {
+  border-color: var(--afui-accent);
+  background: var(--accent-soft);
+}
+
+.session-label {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-detail { color: var(--afui-muted); font-size: 11px; }
+.session-detail[data-secret="true"] { color: var(--secret); font-weight: 750; }
+
+.workspace {
+  min-width: 0;
+  min-height: 0;
+  padding: 14px;
+  background: var(--workspace);
+}
+
+.empty-state {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  height: 100%;
+  border: 1px dashed var(--afui-line);
+  border-radius: 16px;
+  color: var(--afui-muted);
+  text-align: center;
+}
+
+.empty-state h2 { color: var(--afui-ink); font-size: 22px; }
+.empty-state p { max-width: 440px; }
+.terminal-panel[data-secret="true"] {
+  border-color: var(--secret);
+  box-shadow: 0 0 0 1px var(--secret), var(--afui-shadow);
+}
+
+.terminal-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100%;
+  overflow: visible;
+  border: 1px solid var(--afui-line);
+  border-radius: 16px;
+  background: var(--terminal-bg);
+  box-shadow: var(--afui-shadow);
+}
+
+.terminal-heading {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 13px;
+  border-bottom: 1px solid var(--afui-line);
+  background: var(--afui-panel);
+}
+
+.terminal-heading p { margin: 0; color: var(--afui-muted); font-size: 11px; }
+
+.terminal-controls {
+  display: grid;
+  justify-items: end;
+  gap: 3px;
+  min-width: 0;
+}
+
+.actions { display: flex; align-items: center; gap: 6px; }
+
+.actions button {
+  padding: 6px 9px;
+  border: 1px solid var(--afui-line);
+  border-radius: 8px;
+  background: var(--afui-panel-strong);
+  color: var(--afui-ink);
+  font-size: 11px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.actions button:hover { border-color: var(--afui-accent); }
+.actions button:disabled {
+  cursor: wait;
+  opacity: .58;
+}
+.actions .danger { border-color: var(--afui-danger-ink); color: var(--afui-danger-ink); }
+.actions .quiet-danger { color: var(--afui-danger-ink); }
+.actions .secret { border-color: var(--secret); color: var(--secret); }
+
+.actions .secret[data-active="true"] {
+  background: var(--secret);
+  border-color: var(--secret);
+  color: var(--secret-on);
+}
+
+.actions .keys[data-active="true"] { border-color: var(--afui-accent); color: var(--afui-accent); }
+
+.process-menu {
+  position: relative;
+}
+
+.process-menu > summary {
+  min-height: 31px;
+  padding: 6px 9px;
+  border: 1px solid var(--afui-line);
+  border-radius: 8px;
+  background: var(--afui-panel-strong);
+  color: var(--afui-ink);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 17px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.process-menu > summary::-webkit-details-marker { display: none; }
+.process-menu > summary::after { content: " ⌄"; color: var(--afui-muted); }
+.process-menu[open] > summary { border-color: var(--afui-accent); }
+
+.process-menu-items {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 5;
+  display: grid;
+  gap: 4px;
+  min-width: 150px;
+  padding: 6px;
+  border: 1px solid var(--afui-line);
+  border-radius: 10px;
+  background: var(--afui-panel);
+  box-shadow: var(--afui-shadow);
+}
+
+.process-menu-items button {
+  width: 100%;
+  text-align: left;
+}
+
+.activity-status {
+  min-height: 1.25em;
+  margin: 0;
+  color: var(--afui-muted);
+  font-size: 11px;
+  text-align: right;
+}
+
+.activity-status[data-state="pending"] { color: var(--pending); }
+.activity-status[data-state="error"] { color: var(--afui-danger-ink); }
+
+/* The keys a soft keyboard does not have. Outside `.terminal-stage`, so the
+   secret-input overlay never covers it: output is what secret input withholds,
+   never the person's own way of typing. */
+.key-bar {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--afui-line);
+  background: var(--afui-panel);
+  overflow-x: auto;
+}
+
+.key {
+  /* Equal shares of whatever there is, so seven keys fit a 390px phone
+     without the last arrow falling off the right edge. */
+  flex: 1 1 0;
+  min-width: 40px;
+  /* A finger, not a cursor: below about 44px a tap lands on the wrong key. */
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--afui-line);
+  border-radius: 10px;
+  background: var(--afui-panel-strong);
+  color: var(--afui-ink);
+  font-size: 15px;
+  font-weight: 750;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+}
+
+.key:hover { border-color: var(--afui-accent); }
+.key.arrow { font-size: 18px; }
+
+/* Armed is the whole of the sticky modifier's feedback, so it is the loudest
+   thing on the bar. */
+.key.modifier[data-armed="true"] {
+  background: var(--afui-accent);
+  border-color: var(--afui-accent);
+  color: var(--terminal-cursor-ink);
+}
+
+/* The terminal keeps its own box; the overlay covers that box alone, so the
+   session rail and the controls stay usable while a secret is being typed. */
+.terminal-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--terminal-bg);
+  color: var(--terminal-ink);
+}
+
+.terminal {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.secret-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 6px;
+  padding: 24px;
+  /* Opaque: the frozen last frame underneath must not be readable as if it
+     were live, and clicks must still reach the terminal, so nothing here
+     takes pointer events. */
+  background: var(--secret-overlay);
+  border: 2px solid var(--secret);
+  border-radius: 14px;
+  color: var(--terminal-ink);
+  text-align: center;
+  pointer-events: none;
+}
+
+.secret-badge {
+  margin: 0;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--secret);
+  color: var(--secret-on);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+
+.secret-overlay h2 { margin: 6px 0 0; color: var(--secret); font-size: 20px; }
+.secret-detail { max-width: 520px; margin: 0; color: var(--terminal-muted); font-size: 13px; line-height: 1.5; }
+.secret-reason { min-height: 16px; margin: 0; color: var(--terminal-ink); font-size: 12px; }
+
+.terminal-screen {
+  min-height: 100%;
+  width: max-content;
+  min-width: 100%;
+  font-family: var(--afui-mono);
+  font-size: 15px;
+  line-height: 1.18;
+  white-space: pre;
+  user-select: text;
+}
+
+.terminal-row {
+  display: flex;
+  min-height: 1.18em;
+}
+
+.terminal-cell {
+  display: inline-block;
+  flex: 0 0 calc(var(--cell-width) * 1ch);
+  width: calc(var(--cell-width) * 1ch);
+  overflow: visible;
+}
+
+.terminal-cell[data-cursor="true"] {
+  color: var(--terminal-cursor-ink) !important;
+  background: var(--terminal-cursor) !important;
+}
+
+.terminal-input {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: .01;
+  resize: none;
+}
+
+/* While an IME is composing, this field is the thing the person is reading.
+ *
+ * It carries the preedit already — the browser puts the composing text in the
+ * textarea's own value — so showing the field at the cursor shows the half-typed
+ * word where a terminal puts it, underlined the way every other terminal
+ * underlines it. macOS anchors the candidate window to the focused field's
+ * caret, so moving the field onto the cursor is also what makes the candidate
+ * list follow the cursor instead of sitting at the top-left corner. */
+.terminal-input.is-composing {
+  width: auto;
+  min-width: 1ch;
+  height: 1.18em;
+  opacity: 1;
+  z-index: 2;
+  overflow: hidden;
+  font-family: var(--afui-mono);
+  font-size: 15px;
+  line-height: 1.18;
+  white-space: pre;
+  color: var(--terminal-ink);
+  background: var(--terminal-bg);
+  text-decoration: underline;
+  caret-color: var(--terminal-ink);
+}
+
+.terminal-measure {
+  position: absolute;
+  visibility: hidden;
+  font: 15px/1.18 var(--afui-mono);
+}
+
+@media (max-width: 760px) {
+  .shell { grid-template-columns: 150px minmax(0, 1fr); }
+  .topbar { min-height: 62px; }
+  .actions { flex-wrap: wrap; justify-content: flex-end; }
+  .actions button { padding: 6px; }
+}
+
+/* A phone held sideways.
+ *
+ * Every rule above keys off width, and a phone in landscape is wider than the
+ * breakpoints — so it was handed the desktop layout while having less height
+ * than any desktop ever has: a 76px head, a heading, a key bar and a footer
+ * against roughly 390px of viewport, and less than that once a keyboard is up.
+ * The terminal got what was left, which was under one row.
+ *
+ * Height is the scarce dimension here, so the chrome gives its share back. The
+ * head goes entirely — in this shape it repeats what the heading already says —
+ * and everything else shrinks to what it needs to stay tappable. */
+@media (max-height: 500px) and (orientation: landscape) {
+  .topbar { display: none; }
+
+  .shell {
+    grid-template: minmax(0, 1fr) / 150px minmax(0, 1fr);
+  }
+
+  .session-rail { grid-row: 1; grid-column: 1; }
+  .workspace { grid-row: 1; grid-column: 2; }
+
+  .workspace { padding: 6px; }
+
+  .terminal-heading {
+    padding: 4px 8px;
+    gap: 8px;
+  }
+
+  .terminal-heading p { display: none; }
+
+  .terminal-panel { border-radius: 10px; }
+}
+
+@media (pointer: coarse) {
+  .session,
+  .actions button,
+  .process-menu > summary {
+    min-height: 44px;
+  }
+}
+
+/* Phone width. A 150px rail is more than a third of the screen, and the
+   columns it costs are the ones that decide whether a command wraps. The rail
+   becomes a strip along the top instead, so the terminal gets the whole width. */
+@media (max-width: 560px) {
+  .shell { grid-template: auto auto minmax(0, 1fr) / minmax(0, 1fr); }
+
+  .session-rail { grid-row: 2; grid-column: 1; }
+  .workspace { grid-row: 3; grid-column: 1; }
+
+  .session-rail {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--afui-line);
+    overflow-x: auto;
+  }
+
+  .rail-heading { flex: 0 0 auto; gap: 6px; padding: 0; }
+  .sessions { display: flex; flex: 1 1 auto; gap: 6px; }
+  .session { width: auto; padding: 6px 9px; }
+  .session-detail { white-space: nowrap; }
+  .workspace { padding: 8px; }
+  .terminal-panel { border-radius: 12px; }
+  .terminal-heading { flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
+  .terminal { padding: 6px; }
+
+  /* In a short iframe, or while a phone keyboard is open, navigation and
+     repeated session details must not consume every terminal row. app.js
+     derives this state from visualViewport, which is the viewport iOS Safari
+     actually shrinks. Keep connection state and process feedback visible, but
+     collapse the duplicate rail and title until height returns. */
+  html[data-short-viewport="true"] .shell {
+    grid-template: auto minmax(0, 1fr) / minmax(0, 1fr);
+  }
+
+  html[data-short-viewport="true"] .workspace {
+    grid-row: 2;
+  }
+
+  html[data-short-viewport="true"] .topbar {
+    min-height: 36px;
+    padding: 6px 10px;
+  }
+
+  html[data-short-viewport="true"] .topbar > :first-child,
+  html[data-short-viewport="true"] .session-rail,
+  html[data-short-viewport="true"] .terminal-heading > :first-child {
+    display: none;
+  }
+
+  html[data-short-viewport="true"] .workspace {
+    padding: 0;
+  }
+
+  html[data-short-viewport="true"] .terminal-panel {
+    border-right: 0;
+    border-left: 0;
+    border-radius: 0;
+  }
+
+  html[data-short-viewport="true"] .terminal-heading {
+    display: block;
+    padding: 5px 6px;
+  }
+
+  html[data-short-viewport="true"] .actions {
+    width: 100%;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    gap: 5px;
+  }
+
+  html[data-short-viewport="true"] .actions button {
+    flex: 0 0 auto;
+    padding: 5px 7px;
+    font-size: 10px;
+  }
+
+  .terminal-controls {
+    width: 100%;
+    justify-items: stretch;
+  }
+
+  .activity-status {
+    text-align: left;
+  }
+
+  .process-menu-items {
+    right: 0;
+  }
+}

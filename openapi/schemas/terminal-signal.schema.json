@@ -1,0 +1,12 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/terminal-signal.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A process signal: interrupt maps to SIGINT, terminate to SIGTERM, and kill to SIGKILL on Unix",
+  "enum": [
+    "interrupt",
+    "terminate",
+    "kill"
+  ],
+  "title": "TerminalSignal",
+  "type": "string"
+}

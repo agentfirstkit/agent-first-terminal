@@ -1,0 +1,569 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/event-envelope.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "event": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "session_opened"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "screen_seq": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": {
+              "const": "screen_changed"
+            }
+          },
+          "required": [
+            "type",
+            "screen_seq"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "chunk_bytes": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": {
+              "const": "output_chunk"
+            }
+          },
+          "required": [
+            "type",
+            "chunk_bytes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cols": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "rows": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": {
+              "const": "resized"
+            }
+          },
+          "required": [
+            "type",
+            "rows",
+            "cols"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "human",
+                    "agent",
+                    "renderer",
+                    "controller",
+                    "test",
+                    "replay"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "input_bytes": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "lease_id": {
+              "minLength": 1,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "input_accepted"
+            }
+          },
+          "required": [
+            "type",
+            "actor",
+            "input_bytes",
+            "lease_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "human",
+                    "agent",
+                    "renderer",
+                    "controller",
+                    "test",
+                    "replay"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "reason": {
+              "enum": [
+                "lease_required",
+                "lease_not_found",
+                "lease_conflict",
+                "secret_input_active"
+              ],
+              "type": "string"
+            },
+            "type": {
+              "const": "input_rejected"
+            }
+          },
+          "required": [
+            "type",
+            "actor",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "by_actor": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "human",
+                    "agent",
+                    "renderer",
+                    "controller",
+                    "test",
+                    "replay"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "lease_id": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "previous_actor": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "human",
+                    "agent",
+                    "renderer",
+                    "controller",
+                    "test",
+                    "replay"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "input_preempted"
+            }
+          },
+          "required": [
+            "type",
+            "previous_actor",
+            "by_actor",
+            "lease_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "maxLength": 128,
+                      "minLength": 1,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                      "type": "string"
+                    },
+                    "kind": {
+                      "enum": [
+                        "human",
+                        "agent",
+                        "renderer",
+                        "controller",
+                        "test",
+                        "replay"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "lease_id": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                  "type": "string"
+                },
+                "mode": {
+                  "enum": [
+                    "shared",
+                    "exclusive"
+                  ],
+                  "type": "string"
+                },
+                "remaining_ttl_ms": {
+                  "maximum": 300000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "ttl_ms": {
+                  "maximum": 300000,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "lease_id",
+                "actor",
+                "mode",
+                "ttl_ms",
+                "remaining_ttl_ms"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "input_lease_acquired"
+            }
+          },
+          "required": [
+            "type",
+            "lease"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "human",
+                    "agent",
+                    "renderer",
+                    "controller",
+                    "test",
+                    "replay"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "lease_id": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "reason": {
+              "enum": [
+                "released",
+                "expired",
+                "human_preempted"
+              ],
+              "type": "string"
+            },
+            "type": {
+              "const": "input_lease_released"
+            }
+          },
+          "required": [
+            "type",
+            "lease_id",
+            "actor",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "maxLength": 128,
+                      "minLength": 1,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                      "type": "string"
+                    },
+                    "kind": {
+                      "enum": [
+                        "human",
+                        "agent",
+                        "renderer",
+                        "controller",
+                        "test",
+                        "replay"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "lease_id": {
+              "minLength": 1,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "signal": {
+              "description": "A process signal: interrupt maps to SIGINT, terminate to SIGTERM, and kill to SIGKILL on Unix",
+              "enum": [
+                "interrupt",
+                "terminate",
+                "kill"
+              ],
+              "type": "string"
+            },
+            "type": {
+              "const": "signal_sent"
+            }
+          },
+          "required": [
+            "type",
+            "signal",
+            "actor",
+            "lease_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "human",
+                    "agent",
+                    "renderer",
+                    "controller",
+                    "test",
+                    "replay"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "reason": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": {
+              "const": "secret_input_started"
+            }
+          },
+          "required": [
+            "type",
+            "actor",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "human",
+                    "agent",
+                    "renderer",
+                    "controller",
+                    "test",
+                    "replay"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "secret_input_ended"
+            }
+          },
+          "required": [
+            "type",
+            "actor"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "process_exited"
+            }
+          },
+          "required": [
+            "type",
+            "exit_code"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "seq": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "session_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "seq",
+    "session_id",
+    "event"
+  ],
+  "title": "EventEnvelope",
+  "type": "object"
+}

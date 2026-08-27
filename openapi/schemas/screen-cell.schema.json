@@ -1,0 +1,173 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/screen-cell.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "background": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "default"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "index": {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "indexed"
+            }
+          },
+          "required": [
+            "kind",
+            "index"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "blue": {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "green": {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "rgb"
+            },
+            "red": {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "red",
+            "green",
+            "blue"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "bold": {
+      "type": "boolean"
+    },
+    "dim": {
+      "type": "boolean"
+    },
+    "foreground": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "default"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "index": {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "indexed"
+            }
+          },
+          "required": [
+            "kind",
+            "index"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "blue": {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "green": {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "rgb"
+            },
+            "red": {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "red",
+            "green",
+            "blue"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "inverse": {
+      "type": "boolean"
+    },
+    "italic": {
+      "type": "boolean"
+    },
+    "text": {
+      "type": "string"
+    },
+    "underline": {
+      "type": "boolean"
+    },
+    "width": {
+      "enum": [
+        1,
+        2
+      ],
+      "type": "integer"
+    }
+  },
+  "required": [
+    "text",
+    "width",
+    "foreground",
+    "background",
+    "bold",
+    "dim",
+    "italic",
+    "underline",
+    "inverse"
+  ],
+  "title": "ScreenCell",
+  "type": "object"
+}

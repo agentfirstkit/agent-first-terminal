@@ -1,0 +1,67 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/screen-color.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "default"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "index": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "const": "indexed"
+        }
+      },
+      "required": [
+        "kind",
+        "index"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "blue": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "green": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "const": "rgb"
+        },
+        "red": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "red",
+        "green",
+        "blue"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ScreenColor"
+}

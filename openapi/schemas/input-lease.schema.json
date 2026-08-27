@@ -1,0 +1,66 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/input-lease.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "actor": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "human",
+            "agent",
+            "renderer",
+            "controller",
+            "test",
+            "replay"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "lease_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "type": "string"
+    },
+    "mode": {
+      "enum": [
+        "shared",
+        "exclusive"
+      ],
+      "type": "string"
+    },
+    "remaining_ttl_ms": {
+      "maximum": 300000,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ttl_ms": {
+      "maximum": 300000,
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "lease_id",
+    "actor",
+    "mode",
+    "ttl_ms",
+    "remaining_ttl_ms"
+  ],
+  "title": "InputLease",
+  "type": "object"
+}

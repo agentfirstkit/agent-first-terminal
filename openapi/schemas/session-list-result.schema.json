@@ -1,0 +1,65 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/session-list-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "sessions": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "cols": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "exit_code": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rows": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "secret_input": {
+            "description": "True while a person is entering a secret into this session; its output, screen, and input volume are withheld and non-human actors are suspended",
+            "type": "boolean"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "exited",
+              "error"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_id",
+          "status",
+          "exit_code",
+          "rows",
+          "cols",
+          "title",
+          "secret_input"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "sessions"
+  ],
+  "title": "SessionListResult",
+  "type": "object"
+}

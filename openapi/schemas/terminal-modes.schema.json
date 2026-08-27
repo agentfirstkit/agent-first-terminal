@@ -1,0 +1,19 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/terminal-modes.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "application_cursor": {
+      "type": "boolean"
+    },
+    "bracketed_paste": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "application_cursor",
+    "bracketed_paste"
+  ],
+  "title": "TerminalModes",
+  "type": "object"
+}

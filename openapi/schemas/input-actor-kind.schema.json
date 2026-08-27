@@ -1,0 +1,14 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/input-actor-kind.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "enum": [
+    "human",
+    "agent",
+    "renderer",
+    "controller",
+    "test",
+    "replay"
+  ],
+  "title": "InputActorKind",
+  "type": "string"
+}

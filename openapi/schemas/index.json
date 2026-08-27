@@ -1,0 +1,153 @@
+{
+  "count": 29,
+  "json_schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+  "schema_name": "afterminal_schema_index",
+  "schema_version": 1,
+  "schemas": [
+    {
+      "component_name": "AcquireInputLeaseRequest",
+      "schema_name": "acquire-input-lease-request",
+      "schema_url": "/schemas/acquire-input-lease-request.schema.json"
+    },
+    {
+      "component_name": "ActivityResult",
+      "schema_name": "activity-result",
+      "schema_url": "/schemas/activity-result.schema.json"
+    },
+    {
+      "component_name": "ApiErrorEnvelope",
+      "schema_name": "api-error-envelope",
+      "schema_url": "/schemas/api-error-envelope.schema.json"
+    },
+    {
+      "component_name": "CursorResult",
+      "schema_name": "cursor-result",
+      "schema_url": "/schemas/cursor-result.schema.json"
+    },
+    {
+      "component_name": "EventEnvelope",
+      "schema_name": "event-envelope",
+      "schema_url": "/schemas/event-envelope.schema.json"
+    },
+    {
+      "component_name": "HealthResult",
+      "schema_name": "health-result",
+      "schema_url": "/schemas/health-result.schema.json"
+    },
+    {
+      "component_name": "InputAck",
+      "schema_name": "input-ack",
+      "schema_url": "/schemas/input-ack.schema.json"
+    },
+    {
+      "component_name": "InputActor",
+      "schema_name": "input-actor",
+      "schema_url": "/schemas/input-actor.schema.json"
+    },
+    {
+      "component_name": "InputActorKind",
+      "schema_name": "input-actor-kind",
+      "schema_url": "/schemas/input-actor-kind.schema.json"
+    },
+    {
+      "component_name": "InputLease",
+      "schema_name": "input-lease",
+      "schema_url": "/schemas/input-lease.schema.json"
+    },
+    {
+      "component_name": "InputLeaseListResult",
+      "schema_name": "input-lease-list-result",
+      "schema_url": "/schemas/input-lease-list-result.schema.json"
+    },
+    {
+      "component_name": "InputLeaseMode",
+      "schema_name": "input-lease-mode",
+      "schema_url": "/schemas/input-lease-mode.schema.json"
+    },
+    {
+      "component_name": "OpenSessionRequest",
+      "schema_name": "open-session-request",
+      "schema_url": "/schemas/open-session-request.schema.json"
+    },
+    {
+      "component_name": "ResizeRequest",
+      "schema_name": "resize-request",
+      "schema_url": "/schemas/resize-request.schema.json"
+    },
+    {
+      "component_name": "SchemaIndex",
+      "schema_name": "schema-index",
+      "schema_url": "/schemas/schema-index.schema.json"
+    },
+    {
+      "component_name": "ScreenCell",
+      "schema_name": "screen-cell",
+      "schema_url": "/schemas/screen-cell.schema.json"
+    },
+    {
+      "component_name": "ScreenColor",
+      "schema_name": "screen-color",
+      "schema_url": "/schemas/screen-color.schema.json"
+    },
+    {
+      "component_name": "ScreenResult",
+      "schema_name": "screen-result",
+      "schema_url": "/schemas/screen-result.schema.json"
+    },
+    {
+      "component_name": "SecretInputActionRequest",
+      "schema_name": "secret-input-action-request",
+      "schema_url": "/schemas/secret-input-action-request.schema.json"
+    },
+    {
+      "component_name": "SecretInputResult",
+      "schema_name": "secret-input-result",
+      "schema_url": "/schemas/secret-input-result.schema.json"
+    },
+    {
+      "component_name": "SendInputRequest",
+      "schema_name": "send-input-request",
+      "schema_url": "/schemas/send-input-request.schema.json"
+    },
+    {
+      "component_name": "SendSignalRequest",
+      "schema_name": "send-signal-request",
+      "schema_url": "/schemas/send-signal-request.schema.json"
+    },
+    {
+      "component_name": "SessionInfo",
+      "schema_name": "session-info",
+      "schema_url": "/schemas/session-info.schema.json"
+    },
+    {
+      "component_name": "SessionListResult",
+      "schema_name": "session-list-result",
+      "schema_url": "/schemas/session-list-result.schema.json"
+    },
+    {
+      "component_name": "SignalAck",
+      "schema_name": "signal-ack",
+      "schema_url": "/schemas/signal-ack.schema.json"
+    },
+    {
+      "component_name": "TerminalEvent",
+      "schema_name": "terminal-event",
+      "schema_url": "/schemas/terminal-event.schema.json"
+    },
+    {
+      "component_name": "TerminalModes",
+      "schema_name": "terminal-modes",
+      "schema_url": "/schemas/terminal-modes.schema.json"
+    },
+    {
+      "component_name": "TerminalSignal",
+      "schema_name": "terminal-signal",
+      "schema_url": "/schemas/terminal-signal.schema.json"
+    },
+    {
+      "component_name": "Trace",
+      "schema_name": "trace",
+      "schema_url": "/schemas/trace.schema.json"
+    }
+  ]
+}

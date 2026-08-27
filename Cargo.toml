@@ -1,0 +1,78 @@
+[package]
+name = "agent-first-terminal"
+version = "0.1.0"
+edition = "2024"
+description = "Let your AI agent work in a real terminal you can watch — and take the keyboard back whenever you want, from your phone if you are not at the machine."
+license = "MIT"
+repository = "https://github.com/agentfirstkit/agent-first-terminal"
+readme = "README.md"
+include = [
+    "src/**",
+    "skills/**",
+    "tests/**",
+    "docs/**",
+    "openapi/**",
+    "scripts/test.sh",
+    "scripts/release-smoke.sh",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+    "clippy.toml",
+]
+
+[features]
+default = []
+api = [
+    "dep:agent-first-data",
+    "agent-first-data/skill-admin",
+    "agent-first-ui/session",
+    "agent-first-ui/page",
+    "dep:axum",
+    "dep:base64",
+    "dep:reqwest",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tokio",
+    "dep:tokio-stream",
+]
+
+[[bin]]
+name = "afterminal"
+path = "src/main.rs"
+required-features = ["api"]
+
+[dependencies]
+# yaml/toml/dotenv/ini are what `--access-token-secret file:PATH#DOT_PATH` reads
+# out of; without them the source is advertised and cannot be honored.
+agent-first-data = { version = "0.34.0", default-features = false, features = ["cli", "yaml", "toml", "dotenv", "ini"], optional = true }
+# `session`: the terminal window is a served AFUI session with a credential of
+# its own. `page`: the frontend's template is assembled and checked by AFUI's
+# `UiPage` rather than afterminal driving MiniJinja itself.
+agent-first-ui = { version = "0.5.0", default-features = false, optional = true }
+axum = { version = "0.8", optional = true }
+base64 = { version = "0.23", optional = true }
+portable-pty = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"], optional = true }
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
+vt100 = "0.16.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# `test-support` rather than a second copy of AFUI's fingerprint, trust store,
+# stub browser, WebSocket framing, or runtime envelope in this spore's tests.
+agent-first-ui = { version = "0.5.0", default-features = false, features = ["test-support"] }
+serde_json = "1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+print_stdout = "deny"
+print_stderr = "deny"

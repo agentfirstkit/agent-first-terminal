@@ -1,0 +1,58 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/send-signal-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "actor": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "human",
+            "agent",
+            "renderer",
+            "controller",
+            "test",
+            "replay"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "lease_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "signal": {
+      "description": "A process signal: interrupt maps to SIGINT, terminate to SIGTERM, and kill to SIGKILL on Unix",
+      "enum": [
+        "interrupt",
+        "terminate",
+        "kill"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "actor",
+    "signal"
+  ],
+  "title": "SendSignalRequest",
+  "type": "object"
+}

@@ -1,0 +1,2834 @@
+{
+  "$self": "/openapi.json",
+  "components": {
+    "parameters": {
+      "LastEventId": {
+        "description": "Resume after this global event sequence when it remains in the bounded backlog",
+        "in": "header",
+        "name": "Last-Event-ID",
+        "required": false,
+        "schema": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        }
+      },
+      "LeaseId": {
+        "description": "Manager-generated input lease id",
+        "in": "path",
+        "name": "lease_id",
+        "required": true,
+        "schema": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "type": "string"
+        }
+      },
+      "SchemaFile": {
+        "description": "Standalone Schema filename from /schemas/index.json",
+        "in": "path",
+        "name": "schema_file",
+        "required": true,
+        "schema": {
+          "pattern": "^[a-z0-9-]+\\.schema\\.json$",
+          "type": "string"
+        }
+      },
+      "SessionId": {
+        "description": "Caller-selected terminal session id",
+        "in": "path",
+        "name": "session_id",
+        "required": true,
+        "schema": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "type": "string"
+        }
+      }
+    },
+    "schemas": {
+      "AcquireInputLeaseRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/InputActor"
+          },
+          "lease_id": {
+            "description": "Existing lease to renew; omit to renew this actor's lease or create one",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mode": {
+            "$ref": "#/components/schemas/InputLeaseMode"
+          },
+          "ttl_ms": {
+            "default": 5000,
+            "maximum": 300000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "actor",
+          "mode"
+        ],
+        "type": "object"
+      },
+      "ActivityResult": {
+        "additionalProperties": false,
+        "properties": {
+          "last_output_age_ms": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "quiescent": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "last_output_age_ms",
+          "quiescent"
+        ],
+        "type": "object"
+      },
+      "ApiErrorEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "additionalProperties": true,
+            "properties": {
+              "code": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "hint": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "message": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ],
+            "type": "object"
+          },
+          "kind": {
+            "const": "error"
+          },
+          "trace": {
+            "$ref": "#/components/schemas/Trace"
+          }
+        },
+        "required": [
+          "kind",
+          "error",
+          "trace"
+        ],
+        "type": "object"
+      },
+      "CursorResult": {
+        "additionalProperties": false,
+        "properties": {
+          "col": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "row": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "visible": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "row",
+          "col",
+          "visible"
+        ],
+        "type": "object"
+      },
+      "EventEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/TerminalEvent"
+          },
+          "seq": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "event"
+        ],
+        "type": "object"
+      },
+      "HealthResult": {
+        "additionalProperties": false,
+        "properties": {
+          "service": {
+            "const": "afterminal"
+          },
+          "status": {
+            "const": "ready"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "service",
+          "version",
+          "status"
+        ],
+        "type": "object"
+      },
+      "InputAck": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted": {
+            "const": true
+          },
+          "actor": {
+            "$ref": "#/components/schemas/InputActor"
+          },
+          "input_bytes": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "accepted",
+          "input_bytes",
+          "actor"
+        ],
+        "type": "object"
+      },
+      "InputActor": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/InputActorKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "InputActorKind": {
+        "enum": [
+          "human",
+          "agent",
+          "renderer",
+          "controller",
+          "test",
+          "replay"
+        ],
+        "type": "string"
+      },
+      "InputLease": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/InputActor"
+          },
+          "lease_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "type": "string"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/InputLeaseMode"
+          },
+          "remaining_ttl_ms": {
+            "maximum": 300000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ttl_ms": {
+            "maximum": 300000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "lease_id",
+          "actor",
+          "mode",
+          "ttl_ms",
+          "remaining_ttl_ms"
+        ],
+        "type": "object"
+      },
+      "InputLeaseListResult": {
+        "additionalProperties": false,
+        "properties": {
+          "leases": {
+            "items": {
+              "$ref": "#/components/schemas/InputLease"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "leases"
+        ],
+        "type": "object"
+      },
+      "InputLeaseMode": {
+        "enum": [
+          "shared",
+          "exclusive"
+        ],
+        "type": "string"
+      },
+      "OpenSessionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "args": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "cols": {
+            "default": 80,
+            "maximum": 1000,
+            "minimum": 2,
+            "type": "integer"
+          },
+          "cwd_path": {
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "program": {
+            "description": "Program to execute; null or omitted resolves to the server user's shell",
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rows": {
+            "default": 24,
+            "maximum": 1000,
+            "minimum": 2,
+            "type": "integer"
+          },
+          "session_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "ResizeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "cols": {
+            "default": 80,
+            "maximum": 1000,
+            "minimum": 2,
+            "type": "integer"
+          },
+          "rows": {
+            "default": 24,
+            "maximum": 1000,
+            "minimum": 2,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rows",
+          "cols"
+        ],
+        "type": "object"
+      },
+      "SchemaIndex": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_schema_dialect": {
+            "type": "string"
+          },
+          "schema_name": {
+            "const": "afterminal_schema_index"
+          },
+          "schema_version": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "schemas": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "component_name": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "schema_name": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "schema_url": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "schema_name",
+                "schema_url",
+                "component_name"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_name",
+          "schema_version",
+          "json_schema_dialect",
+          "count",
+          "schemas"
+        ],
+        "type": "object"
+      },
+      "ScreenCell": {
+        "additionalProperties": false,
+        "properties": {
+          "background": {
+            "$ref": "#/components/schemas/ScreenColor"
+          },
+          "bold": {
+            "type": "boolean"
+          },
+          "dim": {
+            "type": "boolean"
+          },
+          "foreground": {
+            "$ref": "#/components/schemas/ScreenColor"
+          },
+          "inverse": {
+            "type": "boolean"
+          },
+          "italic": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          },
+          "underline": {
+            "type": "boolean"
+          },
+          "width": {
+            "enum": [
+              1,
+              2
+            ],
+            "type": "integer"
+          }
+        },
+        "required": [
+          "text",
+          "width",
+          "foreground",
+          "background",
+          "bold",
+          "dim",
+          "italic",
+          "underline",
+          "inverse"
+        ],
+        "type": "object"
+      },
+      "ScreenColor": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "default"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "index": {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "indexed"
+              }
+            },
+            "required": [
+              "kind",
+              "index"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "blue": {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "green": {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "rgb"
+              },
+              "red": {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "red",
+              "green",
+              "blue"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ScreenResult": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "$ref": "#/components/schemas/ActivityResult"
+          },
+          "alt_screen": {
+            "type": "boolean"
+          },
+          "cells": {
+            "description": "Styled visible cells; empty while secret_input is true",
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/ScreenCell"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "cols": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "cursor": {
+            "$ref": "#/components/schemas/CursorResult"
+          },
+          "lines": {
+            "description": "Empty while secret_input is true: the screen is withheld, not blank",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "modes": {
+            "$ref": "#/components/schemas/TerminalModes"
+          },
+          "rows": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "secret_input": {
+            "description": "True while a person is entering a secret; the rest of this snapshot then describes the session as it was when that window opened",
+            "type": "boolean"
+          },
+          "seq": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unsupported_extensions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "seq",
+          "cols",
+          "rows",
+          "title",
+          "cursor",
+          "alt_screen",
+          "lines",
+          "cells",
+          "modes",
+          "unsupported_extensions",
+          "activity",
+          "secret_input"
+        ],
+        "type": "object"
+      },
+      "SecretInputActionRequest": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "start"
+              },
+              "actor": {
+                "$ref": "#/components/schemas/InputActor"
+              },
+              "reason": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "actor",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "end"
+              },
+              "actor": {
+                "$ref": "#/components/schemas/InputActor"
+              }
+            },
+            "required": [
+              "action",
+              "actor"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SecretInputResult": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "description": "Who opened the window, absent when it is not open",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/InputActor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "description": "Operator context for the window; never what is being typed",
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secret_input": {
+            "type": "boolean"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "secret_input",
+          "actor",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "SendInputRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/InputActor"
+          },
+          "data_base64": {
+            "contentEncoding": "base64",
+            "description": "Raw bytes to write to the PTY",
+            "type": "string"
+          },
+          "lease_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "actor",
+          "data_base64"
+        ],
+        "type": "object"
+      },
+      "SendSignalRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/InputActor"
+          },
+          "lease_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "signal": {
+            "$ref": "#/components/schemas/TerminalSignal"
+          }
+        },
+        "required": [
+          "actor",
+          "signal"
+        ],
+        "type": "object"
+      },
+      "SessionInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "cols": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "exit_code": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rows": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "secret_input": {
+            "description": "True while a person is entering a secret into this session; its output, screen, and input volume are withheld and non-human actors are suspended",
+            "type": "boolean"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "exited",
+              "error"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_id",
+          "status",
+          "exit_code",
+          "rows",
+          "cols",
+          "title",
+          "secret_input"
+        ],
+        "type": "object"
+      },
+      "SessionListResult": {
+        "additionalProperties": false,
+        "properties": {
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "type": "object"
+      },
+      "SignalAck": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/InputActor"
+          },
+          "delivered": {
+            "const": true
+          },
+          "signal": {
+            "$ref": "#/components/schemas/TerminalSignal"
+          }
+        },
+        "required": [
+          "delivered",
+          "signal",
+          "actor"
+        ],
+        "type": "object"
+      },
+      "TerminalEvent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "session_opened"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "screen_seq": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "type": {
+                "const": "screen_changed"
+              }
+            },
+            "required": [
+              "type",
+              "screen_seq"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "chunk_bytes": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "type": {
+                "const": "output_chunk"
+              }
+            },
+            "required": [
+              "type",
+              "chunk_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cols": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "rows": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "type": {
+                "const": "resized"
+              }
+            },
+            "required": [
+              "type",
+              "rows",
+              "cols"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "$ref": "#/components/schemas/InputActor"
+              },
+              "input_bytes": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "lease_id": {
+                "minLength": 1,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "input_accepted"
+              }
+            },
+            "required": [
+              "type",
+              "actor",
+              "input_bytes",
+              "lease_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "$ref": "#/components/schemas/InputActor"
+              },
+              "reason": {
+                "enum": [
+                  "lease_required",
+                  "lease_not_found",
+                  "lease_conflict",
+                  "secret_input_active"
+                ],
+                "type": "string"
+              },
+              "type": {
+                "const": "input_rejected"
+              }
+            },
+            "required": [
+              "type",
+              "actor",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "by_actor": {
+                "$ref": "#/components/schemas/InputActor"
+              },
+              "lease_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "previous_actor": {
+                "$ref": "#/components/schemas/InputActor"
+              },
+              "type": {
+                "const": "input_preempted"
+              }
+            },
+            "required": [
+              "type",
+              "previous_actor",
+              "by_actor",
+              "lease_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "lease": {
+                "$ref": "#/components/schemas/InputLease"
+              },
+              "type": {
+                "const": "input_lease_acquired"
+              }
+            },
+            "required": [
+              "type",
+              "lease"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "$ref": "#/components/schemas/InputActor"
+              },
+              "lease_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "reason": {
+                "enum": [
+                  "released",
+                  "expired",
+                  "human_preempted"
+                ],
+                "type": "string"
+              },
+              "type": {
+                "const": "input_lease_released"
+              }
+            },
+            "required": [
+              "type",
+              "lease_id",
+              "actor",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/InputActor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "lease_id": {
+                "minLength": 1,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "signal": {
+                "$ref": "#/components/schemas/TerminalSignal"
+              },
+              "type": {
+                "const": "signal_sent"
+              }
+            },
+            "required": [
+              "type",
+              "signal",
+              "actor",
+              "lease_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "$ref": "#/components/schemas/InputActor"
+              },
+              "reason": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": {
+                "const": "secret_input_started"
+              }
+            },
+            "required": [
+              "type",
+              "actor",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "$ref": "#/components/schemas/InputActor"
+              },
+              "type": {
+                "const": "secret_input_ended"
+              }
+            },
+            "required": [
+              "type",
+              "actor"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "exit_code": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "process_exited"
+              }
+            },
+            "required": [
+              "type",
+              "exit_code"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TerminalModes": {
+        "additionalProperties": false,
+        "properties": {
+          "application_cursor": {
+            "type": "boolean"
+          },
+          "bracketed_paste": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "application_cursor",
+          "bracketed_paste"
+        ],
+        "type": "object"
+      },
+      "TerminalSignal": {
+        "description": "A process signal: interrupt maps to SIGINT, terminate to SIGTERM, and kill to SIGKILL on Unix",
+        "enum": [
+          "interrupt",
+          "terminate",
+          "kill"
+        ],
+        "type": "string"
+      },
+      "Trace": {
+        "additionalProperties": false,
+        "properties": {
+          "duration_ms": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "duration_ms"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "description": "Pass the API access token in Authorization. Query-string credentials are not accepted.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "A bearer-protected local terminal runtime API for opening, observing, and safely coordinating human and agent control of multiple PTY sessions.",
+    "title": "Agent-First Terminal API",
+    "version": "0.1.0"
+  },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "openapi": "3.2.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/HealthResult"
+                    },
+                    "trace": {
+                      "$ref": "#/components/schemas/Trace"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The API process is ready"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          }
+        },
+        "security": [],
+        "summary": "Check API process health",
+        "tags": [
+          "discovery"
+        ]
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "getOpenApiDocument",
+        "responses": {
+          "200": {
+            "content": {
+              "application/vnd.oai.openapi+json;version=3.2": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The generated OpenAPI 3.2 document"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          }
+        },
+        "security": [],
+        "summary": "Read the served OpenAPI contract",
+        "tags": [
+          "discovery"
+        ]
+      }
+    },
+    "/schemas/index.json": {
+      "get": {
+        "operationId": "listJsonSchemas",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchemaIndex"
+                }
+              }
+            },
+            "description": "The standalone Schema index"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          }
+        },
+        "security": [],
+        "summary": "List the standalone JSON Schemas this process serves",
+        "tags": [
+          "discovery"
+        ]
+      }
+    },
+    "/schemas/{schema_file}": {
+      "get": {
+        "operationId": "getJsonSchema",
+        "responses": {
+          "200": {
+            "content": {
+              "application/schema+json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "A self-contained JSON Schema 2020-12 document"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "No Schema is served under that filename"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          }
+        },
+        "security": [],
+        "summary": "Read one standalone JSON Schema",
+        "tags": [
+          "discovery"
+        ]
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SchemaFile"
+        }
+      ]
+    },
+    "/v1/events": {
+      "get": {
+        "description": "Each SSE id is the globally monotonic event sequence. Event payloads identify their session and never contain raw terminal bytes.",
+        "operationId": "streamEvents",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/LastEventId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "$ref": "#/components/schemas/EventEnvelope"
+                }
+              }
+            },
+            "description": "A server-sent event stream"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The runtime could not serve the event stream"
+          }
+        },
+        "summary": "Watch the multiplexed event stream for every session",
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/v1/sessions": {
+      "get": {
+        "operationId": "listSessions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/SessionListResult"
+                    },
+                    "trace": {
+                      "$ref": "#/components/schemas/Trace"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "All current sessions"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request is invalid"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session or requested lease does not exist"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request conflicts with current session or lease state"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request body or decoded terminal input is too large"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The terminal runtime failed"
+          }
+        },
+        "summary": "List every terminal session",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "operationId": "openSession",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/SessionInfo"
+                    },
+                    "trace": {
+                      "$ref": "#/components/schemas/Trace"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The opened session"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request is invalid"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session or requested lease does not exist"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request conflicts with current session or lease state"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request body or decoded terminal input is too large"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The terminal runtime failed"
+          }
+        },
+        "summary": "Open a PTY-backed terminal session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}": {
+      "delete": {
+        "operationId": "closeSession",
+        "responses": {
+          "204": {
+            "description": "The session was closed"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session does not exist"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The terminal runtime failed"
+          }
+        },
+        "summary": "Kill and remove a terminal session",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "get": {
+        "operationId": "getSession",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/SessionInfo"
+                    },
+                    "trace": {
+                      "$ref": "#/components/schemas/Trace"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Current session metadata"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request is invalid"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session or requested lease does not exist"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request conflicts with current session or lease state"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request body or decoded terminal input is too large"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The terminal runtime failed"
+          }
+        },
+        "summary": "Read terminal session metadata",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ]
+    },
+    "/v1/sessions/{session_id}/input": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "post": {
+        "description": "Input is base64-encoded and written as one atomic chunk. Non-human actors must provide one of their active shared or exclusive leases; human input may omit a lease and preempts a non-human exclusive holder.",
+        "operationId": "sendInput",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendInputRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/InputAck"
+                    },
+                    "trace": {
+                      "$ref": "#/components/schemas/Trace"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The input was accepted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request is invalid"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session or requested lease does not exist"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request conflicts with current session or lease state"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request body or decoded terminal input is too large"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The terminal runtime failed"
+          }
+        },
+        "summary": "Write bytes to a terminal session",
+        "tags": [
+          "input"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/leases": {
+      "get": {
+        "operationId": "listInputLeases",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/InputLeaseListResult"
+                    },
+                    "trace": {
+                      "$ref": "#/components/schemas/Trace"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Every unexpired input lease in deterministic order"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request is invalid"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session or requested lease does not exist"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request conflicts with current session or lease state"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request body or decoded terminal input is too large"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The terminal runtime failed"
+          }
+        },
+        "summary": "List active input leases",
+        "tags": [
+          "input"
+        ]
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "post": {
+        "description": "Shared leases allow multiple agents to submit atomic chunks. Exclusive leases reserve non-human input for one actor. Repeating the same actor without lease_id renews that actor's existing lease.",
+        "operationId": "acquireInputLease",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcquireInputLeaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/InputLease"
+                    },
+                    "trace": {
+                      "$ref": "#/components/schemas/Trace"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The active input lease"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The actor, lease id, or ttl_ms is invalid"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session or requested lease does not exist"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The requested lease conflicts with another active holder"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The terminal runtime could not manage the lease"
+          }
+        },
+        "summary": "Acquire or renew an input lease",
+        "tags": [
+          "input"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/leases/{lease_id}": {
+      "delete": {
+        "operationId": "releaseInputLease",
+        "responses": {
+          "204": {
+            "description": "The input lease was released"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session does not exist"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The terminal runtime failed"
+          }
+        },
+        "summary": "Release an input lease",
+        "tags": [
+          "input"
+        ]
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        },
+        {
+          "$ref": "#/components/parameters/LeaseId"
+        }
+      ]
+    },
+    "/v1/sessions/{session_id}/resize": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "post": {
+        "operationId": "resizeSession",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResizeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/SessionInfo"
+                    },
+                    "trace": {
+                      "$ref": "#/components/schemas/Trace"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated session metadata"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request is invalid"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session or requested lease does not exist"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request conflicts with current session or lease state"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request body or decoded terminal input is too large"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The terminal runtime failed"
+          }
+        },
+        "summary": "Resize a terminal session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/screen": {
+      "get": {
+        "operationId": "getScreen",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/ScreenResult"
+                    },
+                    "trace": {
+                      "$ref": "#/components/schemas/Trace"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Current screen snapshot"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request is invalid"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session or requested lease does not exist"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request conflicts with current session or lease state"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request body or decoded terminal input is too large"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The terminal runtime failed"
+          }
+        },
+        "summary": "Read the current structured terminal screen",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ]
+    },
+    "/v1/sessions/{session_id}/secret-input": {
+      "get": {
+        "description": "While secret input is on, this session publishes no output, no screen content and no input volume, and every non-human actor is refused input, signals and leases. The reason is operator context; it never carries what is being typed.",
+        "operationId": "getSecretInput",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/SecretInputResult"
+                    },
+                    "trace": {
+                      "$ref": "#/components/schemas/Trace"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Current secret input state"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request is invalid"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session or requested lease does not exist"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request conflicts with current session or lease state"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request body or decoded terminal input is too large"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The terminal runtime failed"
+          }
+        },
+        "summary": "Read whether a session is taking secret input",
+        "tags": [
+          "secret-input"
+        ]
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ]
+    },
+    "/v1/sessions/{session_id}/secret-input/actions": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "post": {
+        "description": "Any actor may start a window — raising this shield is the safe direction, so a prompt detector should be able to. Only a human actor may end one: an agent that could end it could simply end it and read the screen.",
+        "operationId": "secretInputAction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretInputActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/SecretInputResult"
+                    },
+                    "trace": {
+                      "$ref": "#/components/schemas/Trace"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Secret input state after the action"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The actor or reason is invalid"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Only a human actor may end secret input mode"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session does not exist"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session is still producing output, so the window cannot end yet"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The terminal runtime failed"
+          }
+        },
+        "summary": "Start or end secret input mode",
+        "tags": [
+          "secret-input"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/signal": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "post": {
+        "description": "Uses the same actor and lease rules as input, then delivers a real operating-system process signal instead of writing a control character. Unix supports interrupt (SIGINT), terminate (SIGTERM), and kill (SIGKILL); other platforms may support only kill.",
+        "operationId": "signalSession",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendSignalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/SignalAck"
+                    },
+                    "trace": {
+                      "$ref": "#/components/schemas/Trace"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The operating system accepted the signal for delivery"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The request is invalid"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A valid bearer credential is required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The session or requested lease does not exist"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The HTTP method is not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The process is no longer running or the actor lacks a valid lease"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The terminal runtime could not deliver the signal"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "The signal is not supported on this platform"
+          }
+        },
+        "summary": "Signal the terminal's foreground process group",
+        "tags": [
+          "input"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "servers": [
+    {
+      "description": "The loopback afterminal process that served this document",
+      "url": "/"
+    }
+  ],
+  "tags": [
+    {
+      "name": "discovery"
+    },
+    {
+      "name": "sessions"
+    },
+    {
+      "name": "input"
+    },
+    {
+      "name": "secret-input"
+    },
+    {
+      "name": "events"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/activity-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "last_output_age_ms": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "quiescent": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "last_output_age_ms",
+    "quiescent"
+  ],
+  "title": "ActivityResult",
+  "type": "object"
+}
