@@ -776,6 +776,54 @@ pub struct EventSubscription {
     pub receiver: Receiver<EventEnvelope>,
 }
 
+/// Answers the questions a program asks of the terminal it is running in.
+///
+/// A terminal is not only a sink for bytes: a program can ask it where the
+/// cursor is (`ESC[6n`) or whether it is healthy (`ESC[5n`) and then *wait* for
+/// the answer. Windows makes this unavoidable — ConPTY opens by asking for the
+/// cursor position and does not emit so much as a shell prompt until it is
+/// answered — so a terminal that stays silent here is not a degraded terminal
+/// but a dead one. On Unix the same query comes from shells measuring their own
+/// prompt and from full-screen programs finding their footing.
+///
+/// The replies are collected rather than written from inside the callback: the
+/// parser runs under the `Shared` lock on the reader thread, and the writer is
+/// the manager's. Handing them back lets the reader send them with no lock
+/// held.
+#[derive(Default)]
+struct TerminalQueries {
+    replies: Vec<Vec<u8>>,
+}
+
+impl vt100::Callbacks for TerminalQueries {
+    fn unhandled_csi(
+        &mut self,
+        screen: &mut vt100::Screen,
+        intermediate: Option<u8>,
+        _intermediate2: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        // Device Status Report. A private form (`ESC[?...n`) asks about
+        // extensions this terminal does not implement, and is left unanswered
+        // rather than answered wrongly.
+        if c != 'n' || intermediate.is_some() {
+            return;
+        }
+        match params.first().and_then(|param| param.first()).copied() {
+            // "Are you there?" — report no malfunction.
+            Some(5) => self.replies.push(b"\x1b[0n".to_vec()),
+            // "Where is the cursor?" — CPR is 1-based, the model is 0-based.
+            Some(6) => {
+                let (row, col) = screen.cursor_position();
+                self.replies
+                    .push(format!("\x1b[{};{}R", row + 1, col + 1).into_bytes());
+            }
+            _ => {}
+        }
+    }
+}
+
 /// State shared between a session handle and its reader thread.
 struct Shared {
     ring: Vec<u8>,
@@ -783,7 +831,7 @@ struct Shared {
     subscribers: Vec<Sender<Vec<u8>>>,
     status: TerminalSessionStatus,
     // Phase 2: VT screen model using vt100
-    parser: vt100::Parser,
+    parser: vt100::Parser<TerminalQueries>,
     screen_seq: u64,
     last_output: Instant,
     spec_title: Option<String>,
@@ -801,13 +849,20 @@ struct Shared {
 }
 
 impl Shared {
-    fn push_chunk(&mut self, chunk: &[u8]) {
+    /// Feeds one chunk of output through the terminal model, and returns
+    /// anything the program on the far end is waiting to be told in reply.
+    #[must_use]
+    fn push_chunk(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
         // Phase 2: feed bytes to the VT parser and update screen state. This
         // happens first and unconditionally: the runtime's own model of the
         // terminal has to stay in step with the real one even while none of it
         // may leave the process, or the screen would be permanently wrong
         // after every secret window.
         self.parser.process(chunk);
+        // Taken before the secret-mode return below: a query answered late is
+        // a session that never starts, and the answer is terminal protocol
+        // rather than anything derived from what is being typed.
+        let replies = std::mem::take(&mut self.parser.callbacks_mut().replies);
         self.screen_seq += 1;
         self.last_output = Instant::now();
 
@@ -816,7 +871,7 @@ impl Shared {
         // it — not even its size, which on an echoed prompt is the length of
         // what is being typed.
         if self.secret.is_some() {
-            return;
+            return replies;
         }
 
         // Push to raw byte ring for raw subscribers.
@@ -847,6 +902,8 @@ impl Shared {
                 },
             );
         }
+
+        replies
     }
 
     /// Extract the current screen snapshot.
@@ -1018,7 +1075,10 @@ impl ActiveInputLease {
 /// One backend-backed shell session.
 struct TerminalSession {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    /// Shared with the reader thread, which answers terminal queries on this
+    /// same channel. The mutex is what keeps a reply from landing in the middle
+    /// of an actor's write.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     #[allow(dead_code)]
     child: Box<dyn Child + Send + Sync>,
     shared: Arc<Mutex<Shared>>,
@@ -1158,7 +1218,8 @@ impl TerminalSessionManager {
             .map_err(|error| TerminalError::Backend(error.to_string()))?;
 
         // Phase 2: Initialize the VT screen model with the specified dimensions.
-        let parser = vt100::Parser::new(spec.rows, spec.cols, 0);
+        let parser =
+            vt100::Parser::new_with_callbacks(spec.rows, spec.cols, 0, TerminalQueries::default());
 
         let shared = Arc::new(Mutex::new(Shared {
             ring: Vec::new(),
@@ -1177,14 +1238,29 @@ impl TerminalSessionManager {
         }));
 
         let reader_shared = Arc::clone(&shared);
+        let writer = Arc::new(Mutex::new(writer));
+        let reader_writer = Arc::clone(&writer);
         let reader = std::thread::spawn(move || {
             let mut buffer = [0u8; 8192];
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(read) => {
-                        if let Ok(mut state) = reader_shared.lock() {
-                            state.push_chunk(&buffer[..read]);
+                        let replies = match reader_shared.lock() {
+                            Ok(mut state) => state.push_chunk(&buffer[..read]),
+                            Err(_) => Vec::new(),
+                        };
+                        // Sent with no `Shared` lock held, so answering a query
+                        // can never wait on a writer the manager is using.
+                        if !replies.is_empty()
+                            && let Ok(mut writer) = reader_writer.lock()
+                        {
+                            for reply in replies {
+                                if writer.write_all(&reply).is_err() {
+                                    break;
+                                }
+                            }
+                            let _ = writer.flush();
                         }
                     }
                     Err(_) => break,
@@ -1234,8 +1310,12 @@ impl TerminalSessionManager {
             .sessions
             .get_mut(id)
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
-        session.writer.write_all(bytes)?;
-        session.writer.flush()?;
+        let mut writer = session
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        writer.write_all(bytes)?;
+        writer.flush()?;
         Ok(())
     }
 
@@ -1265,8 +1345,12 @@ impl TerminalSessionManager {
             .sessions
             .get_mut(id)
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
-        session.writer.write_all(bytes)?;
-        session.writer.flush()?;
+        let mut writer = session
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        writer.write_all(bytes)?;
+        writer.flush()?;
 
         // A secret is typed by a person, so this write is accepted — but
         // announcing it would publish how many bytes the secret is.
@@ -1384,7 +1468,12 @@ impl TerminalSessionManager {
                 // grid after the shield drops. Start from a clean authoritative
                 // screen; the next program output repopulates it without ever
                 // exposing the protected interval.
-                state.parser = vt100::Parser::new(state.rows, state.cols, 0);
+                state.parser = vt100::Parser::new_with_callbacks(
+                    state.rows,
+                    state.cols,
+                    0,
+                    TerminalQueries::default(),
+                );
                 state.screen_seq += 1;
             }
             ended
@@ -2326,37 +2415,62 @@ mod tests {
     // any other test that happens to read the same variable name.
     static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    #[cfg(windows)]
+    fn query_replies(parser: &mut vt100::Parser<TerminalQueries>) -> Vec<String> {
+        std::mem::take(&mut parser.callbacks_mut().replies)
+            .into_iter()
+            .map(|reply| String::from_utf8_lossy(&reply).escape_debug().to_string())
+            .collect()
+    }
+
+    /// A program can ask the terminal where the cursor is and then wait for the
+    /// answer. Windows makes that unavoidable: ConPTY opens by asking, and
+    /// emits nothing at all — no banner, no prompt, no echo of what is typed —
+    /// until it is answered. A terminal silent here is not a degraded terminal,
+    /// it is a dead one, which is what the Windows binary was.
     #[test]
-    fn diagnose_cmd_io() {
-        fn collect(sub: &TerminalSubscription, ms: u64) -> String {
-            let mut acc = sub.backlog.clone();
-            let deadline = Instant::now() + Duration::from_millis(ms);
-            while Instant::now() < deadline {
-                if let Ok(chunk) = sub.receiver.recv_timeout(Duration::from_millis(100)) {
-                    acc.extend_from_slice(&chunk);
-                }
-            }
-            String::from_utf8_lossy(&acc).escape_debug().to_string()
-        }
-        let mut report = String::new();
-        let mut manager = TerminalSessionManager::new();
-        let id = manager
-            .open("diag", test_shell::spec())
-            .expect("diag session opens");
-        let sub = manager.subscribe(&id).expect("subscribe");
-        report.push_str(&format!("PROGRAM={:?}\n", test_shell::program()));
-        report.push_str(&format!("ARGS={:?}\n", test_shell::args()));
-        report.push_str(&format!("AFTER_OPEN=[{}]\n", collect(&sub, 2500)));
-        manager.write(&id, b"echo AAA\r").expect("write cr");
-        report.push_str(&format!("AFTER_CR=[{}]\n", collect(&sub, 2500)));
-        manager.write(&id, b"echo BBB\r\n").expect("write crlf");
-        report.push_str(&format!("AFTER_CRLF=[{}]\n", collect(&sub, 2500)));
-        manager.write(&id, b"echo CCC\n").expect("write lf");
-        report.push_str(&format!("AFTER_LF=[{}]\n", collect(&sub, 2500)));
-        report.push_str(&format!("SCREEN={:?}\n", manager.screen(&id).map(|s| s.lines)));
-        report.push_str(&format!("STATUS={:?}\n", manager.status(&id)));
-        panic!("CMD IO DIAGNOSTIC\n{report}");
+    fn the_terminal_answers_where_its_cursor_is() {
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, TerminalQueries::default());
+        parser.process(b"\x1b[6n");
+        assert_eq!(
+            query_replies(&mut parser),
+            vec!["\\u{1b}[1;1R".to_string()],
+            "an untouched screen reports the cursor at the origin, 1-based"
+        );
+
+        // The answer describes the screen as it is now, not as it opened.
+        parser.process(b"hello\r\nworld");
+        parser.process(b"\x1b[6n");
+        assert_eq!(
+            query_replies(&mut parser),
+            vec!["\\u{1b}[2;6R".to_string()],
+            "the reported position must follow the cursor"
+        );
+    }
+
+    /// The other half of the same conversation, and the limit of it: this
+    /// terminal answers what it can and stays quiet about what it cannot, since
+    /// a program that believes a wrong answer is worse off than one that gets
+    /// none.
+    #[test]
+    fn the_terminal_reports_itself_healthy_and_declines_what_it_cannot_answer() {
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, TerminalQueries::default());
+        parser.process(b"\x1b[5n");
+        assert_eq!(
+            query_replies(&mut parser),
+            vec!["\\u{1b}[0n".to_string()],
+            "a status query is answered with no malfunction"
+        );
+
+        // `ESC[?6n` asks about extensions this terminal does not implement.
+        parser.process(b"\x1b[?6n");
+        assert!(
+            query_replies(&mut parser).is_empty(),
+            "a private query must not be answered as if it were the standard one"
+        );
+
+        // And an unrelated sequence is not mistaken for a question.
+        parser.process(b"\x1b[2J");
+        assert!(query_replies(&mut parser).is_empty());
     }
 
     /// A caller that names no program must get a shell this platform can
