@@ -2415,6 +2415,56 @@ mod tests {
     // any other test that happens to read the same variable name.
     static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    #[cfg(windows)]
+    #[test]
+    fn diagnose_credential_scrub() {
+        const VAR: &str = "AFTERMINAL_API_ACCESS_TOKEN_SECRET";
+        fn collect(sub: &TerminalSubscription, ms: u64) -> String {
+            let mut acc = sub.backlog.clone();
+            let deadline = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < deadline {
+                if let Ok(chunk) = sub.receiver.recv_timeout(Duration::from_millis(100)) {
+                    acc.extend_from_slice(&chunk);
+                }
+            }
+            String::from_utf8_lossy(&acc).escape_debug().to_string()
+        }
+        let _guard = ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe { std::env::set_var(VAR, "the-api-bearer") };
+        let mut report = String::new();
+        let mut manager = TerminalSessionManager::new();
+
+        let scrubbed = manager
+            .open(
+                "diag_scrub",
+                TerminalOpenSpec {
+                    api_requested: true,
+                    ..test_shell::spec()
+                },
+            )
+            .expect("scrubbed session opens");
+        let sub_a = manager.subscribe(&scrubbed).expect("subscribe a");
+        manager
+            .write(&scrubbed, &test_shell::echo_env("TOKEN", VAR))
+            .expect("write a");
+        report.push_str(&format!("WROTE={:?}\n", String::from_utf8_lossy(&test_shell::echo_env("TOKEN", VAR))));
+        report.push_str(&format!("SCRUBBED_RAW=[{}]\n", collect(&sub_a, 4000)));
+        report.push_str(&format!("SCRUBBED_SCREEN={:?}\n", manager.screen(&scrubbed).map(|s| s.lines)));
+
+        let kept = manager
+            .open("diag_keep", test_shell::spec())
+            .expect("inheriting session opens");
+        let sub_b = manager.subscribe(&kept).expect("subscribe b");
+        manager
+            .write(&kept, &test_shell::echo_env("TOKEN", VAR))
+            .expect("write b");
+        report.push_str(&format!("KEPT_RAW=[{}]\n", collect(&sub_b, 4000)));
+        unsafe { std::env::remove_var(VAR) };
+        panic!("CREDENTIAL SCRUB DIAGNOSTIC\n{report}");
+    }
+
     fn query_replies(parser: &mut vt100::Parser<TerminalQueries>) -> Vec<String> {
         std::mem::take(&mut parser.callbacks_mut().replies)
             .into_iter()
