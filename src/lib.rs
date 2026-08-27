@@ -2326,6 +2326,39 @@ mod tests {
     // any other test that happens to read the same variable name.
     static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    #[cfg(windows)]
+    #[test]
+    fn diagnose_cmd_io() {
+        fn collect(sub: &TerminalSubscription, ms: u64) -> String {
+            let mut acc = sub.backlog.clone();
+            let deadline = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < deadline {
+                if let Ok(chunk) = sub.receiver.recv_timeout(Duration::from_millis(100)) {
+                    acc.extend_from_slice(&chunk);
+                }
+            }
+            String::from_utf8_lossy(&acc).escape_debug().to_string()
+        }
+        let mut report = String::new();
+        let mut manager = TerminalSessionManager::new();
+        let id = manager
+            .open("diag", test_shell::spec())
+            .expect("diag session opens");
+        let sub = manager.subscribe(&id).expect("subscribe");
+        report.push_str(&format!("PROGRAM={:?}\n", test_shell::program()));
+        report.push_str(&format!("ARGS={:?}\n", test_shell::args()));
+        report.push_str(&format!("AFTER_OPEN=[{}]\n", collect(&sub, 2500)));
+        manager.write(&id, b"echo AAA\r").expect("write cr");
+        report.push_str(&format!("AFTER_CR=[{}]\n", collect(&sub, 2500)));
+        manager.write(&id, b"echo BBB\r\n").expect("write crlf");
+        report.push_str(&format!("AFTER_CRLF=[{}]\n", collect(&sub, 2500)));
+        manager.write(&id, b"echo CCC\n").expect("write lf");
+        report.push_str(&format!("AFTER_LF=[{}]\n", collect(&sub, 2500)));
+        report.push_str(&format!("SCREEN={:?}\n", manager.screen(&id).map(|s| s.lines)));
+        report.push_str(&format!("STATUS={:?}\n", manager.status(&id)));
+        panic!("CMD IO DIAGNOSTIC\n{report}");
+    }
+
     /// A caller that names no program must get a shell this platform can
     /// actually execute.
     ///
