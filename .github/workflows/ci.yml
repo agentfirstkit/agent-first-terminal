@@ -59,3 +59,53 @@ jobs:
       # runner already provides.
       - name: Release gate
         run: ./scripts/test.sh all
+
+  # Windows ships in every release and was tested in none of them until the
+  # release was already running: this repository's gate is Linux, and the
+  # Windows leg only exists in release.yml, which does not start until a tag
+  # does. That is how a Windows-only break in the release smoke first appeared
+  # with the crate one step from publication.
+  #
+  # What runs here is what Windows can answer for. The PTY, window and delivery
+  # smokes are Unix-only — they select over pipes, write a `#!/bin/sh` browser
+  # stub, and open the session on `/bin/sh` — so this leg builds the feature the
+  # release ships, runs the unit suites, and checks the binary states its own
+  # version, help and reference through the protocol.
+  windows:
+    runs-on: windows-2025
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build the feature the release ships
+        run: cargo build --release --features api --bin afterminal
+
+      - name: Unit suites
+        run: cargo test --features api --lib --bins
+
+      # The same three streams the release smoke validates on Windows, checked
+      # here so a break in them fails a push instead of a tagged release.
+      - name: CLI protocol streams
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=target/release/afterminal.exe
+          "$BIN" --version --output json > version.jsonl
+          "$BIN" ui --help --output json > ui-help.jsonl
+          "$BIN" api --help --output json > api-help.jsonl
+          cargo install agent-first-data --locked --features skill
+          afdata validate version.jsonl --strict
+          afdata validate ui-help.jsonl --strict
+          afdata validate api-help.jsonl --strict
