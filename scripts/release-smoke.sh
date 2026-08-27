@@ -45,8 +45,27 @@ afdata_run --quiet afdata validate "$SMOKE_TMP/api-help.jsonl" --strict
 # Drive the release binary through the same hermetic API, window and nested
 # session flows as the debug gate. The browser is a stub, but every page and
 # asset is fetched from the real listener.
-afdata_run --quiet python3 tests/api_smoke.py "$AFTERMINAL"
-afdata_run --quiet python3 tests/ui_smoke.py "$AFTERMINAL"
-afdata_run --quiet python3 tests/ui_delivery_smoke.py "$AFTERMINAL"
+#
+# These three are Unix-only, and say so here rather than failing on Windows with
+# a stack trace about sockets. They read the child's stdout through `selectors`,
+# which on Windows selects over sockets and not pipes; they write a `#!/bin/sh`
+# stub for the browser; and they open the session on `/bin/sh`. Porting them
+# means a second implementation of each, which would then be the thing under
+# test on the platform that has the least of afterminal to test — Windows has
+# ConPTY through portable-pty, but only `kill` among the signals.
+#
+# What is checked on Windows is what a Windows artifact promises: the binary
+# runs, states its version through the protocol, and prints its own reference.
+# That is above and the validation has already run on it.
+case "${OSTYPE:-}" in
+  msys* | cygwin* | win32)
+    afdata_log warn "PTY, window and delivery smokes are Unix-only; ran the CLI checks only"
+    ;;
+  *)
+    afdata_run --quiet python3 tests/api_smoke.py "$AFTERMINAL"
+    afdata_run --quiet python3 tests/ui_smoke.py "$AFTERMINAL"
+    afdata_run --quiet python3 tests/ui_delivery_smoke.py "$AFTERMINAL"
+    ;;
+esac
 
 afdata_result "afterminal release smoke passed; complete the device matrix on target devices"
