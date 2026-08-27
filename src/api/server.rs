@@ -1106,6 +1106,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{ApiState, result_response, test_router};
+    use crate::test_shell;
 
     const TOKEN: &str = "test-token-0123456789-abcdefghijkl";
 
@@ -1182,7 +1183,8 @@ mod tests {
                 "/v1/sessions",
                 json!({
                     "session_id": session_id,
-                    "program": "/bin/sh",
+                    "program": test_shell::program(),
+                    "args": test_shell::args(),
                     "rows": 24,
                     "cols": 80
                 }),
@@ -1209,8 +1211,8 @@ mod tests {
             assert_eq!(lease.0, StatusCode::OK, "{}", lease.1);
             let lease_id = lease.1["lease_id"].as_str().expect("lease id").to_string();
 
-            let command = format!("printf '{marker}\\n'\n");
-            let data_base64 = base64::engine::general_purpose::STANDARD.encode(command.as_bytes());
+            let command = test_shell::echo(marker);
+            let data_base64 = base64::engine::general_purpose::STANDARD.encode(&command);
             let response = call_json(
                 &app,
                 "POST",
@@ -1277,7 +1279,8 @@ mod tests {
             "/v1/sessions",
             json!({
                 "session_id": session_id,
-                "program": "/bin/sh",
+                "program": test_shell::program(),
+                "args": test_shell::args(),
                 "rows": 24,
                 "cols": 80
             }),
@@ -1323,7 +1326,7 @@ mod tests {
             ("agent-a", lease_a_id.as_str(), "API_AGENT_A"),
             ("agent-b", lease_b_id.as_str(), "API_AGENT_B"),
         ] {
-            let command = format!("printf '{marker}\\n'\n");
+            let command = test_shell::echo(marker);
             let input = call_json(
                 &app,
                 "POST",
@@ -1332,7 +1335,7 @@ mod tests {
                     "actor": {"kind": "agent", "id": actor_id},
                     "lease_id": lease_id,
                     "data_base64": base64::engine::general_purpose::STANDARD
-                        .encode(command.as_bytes())
+                        .encode(&command)
                 }),
             )
             .await;
@@ -1396,7 +1399,7 @@ mod tests {
             json!({
                 "actor": {"kind": "human", "id": "human-a"},
                 "data_base64": base64::engine::general_purpose::STANDARD
-                    .encode(b"printf 'API_HUMAN\\n'\n")
+                    .encode(test_shell::echo("API_HUMAN"))
             }),
         )
         .await;
@@ -1416,7 +1419,7 @@ mod tests {
                 "actor": {"kind": "agent", "id": "agent-a"},
                 "lease_id": lease_a_id.as_str(),
                 "data_base64": base64::engine::general_purpose::STANDARD
-                    .encode(b"printf 'STILL_HELD\\n'\n")
+                    .encode(test_shell::echo("STILL_HELD"))
             }),
         )
         .await;
@@ -1583,7 +1586,11 @@ mod tests {
             &app,
             "POST",
             "/v1/sessions",
-            json!({"session_id": session_id, "program": "/bin/sh"}),
+            json!({
+                "session_id": session_id,
+                "program": test_shell::program(),
+                "args": test_shell::args(),
+            }),
         )
         .await;
         assert_eq!(opened.0, StatusCode::OK, "{}", opened.1);
@@ -1660,7 +1667,7 @@ mod tests {
             json!({
                 "actor": {"kind": "controller", "id": "api-controller"},
                 "data_base64": base64::engine::general_purpose::STANDARD
-                    .encode(b"printf 'API_SECRET_VALUE\\n'\n")
+                    .encode(test_shell::echo("API_SECRET_VALUE"))
             }),
         )
         .await;
@@ -1678,7 +1685,7 @@ mod tests {
                     session_id,
                     ui_test_actor(),
                     None,
-                    b"printf 'SECRET_VALUE_XYZ\n'\n",
+                    &test_shell::echo("SECRET_VALUE_XYZ"),
                 )
                 .expect("the local interface writes into its own window");
         }
@@ -1766,7 +1773,11 @@ mod tests {
             &app,
             "POST",
             "/v1/sessions",
-            json!({"session_id": session_id, "program": "/bin/sh"}),
+            json!({
+                "session_id": session_id,
+                "program": test_shell::program(),
+                "args": test_shell::args(),
+            }),
         )
         .await;
         assert_eq!(opened.0, StatusCode::OK, "{}", opened.1);
@@ -1779,7 +1790,7 @@ mod tests {
                 "actor": {"kind": "controller", "id": "api-controller"},
                 "lease_id": lease_id,
                 "data_base64": base64::engine::general_purpose::STANDARD
-                    .encode(b"printf 'RESUME\\n'\n")
+                    .encode(test_shell::echo("RESUME"))
             }),
         )
         .await;

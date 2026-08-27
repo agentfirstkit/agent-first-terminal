@@ -466,7 +466,8 @@ impl TerminalSessionStatus {
 /// How to start a session. This is trusted host/agent input.
 #[derive(Debug, Clone)]
 pub struct TerminalOpenSpec {
-    /// Program to execute. `None` resolves to `$SHELL`, then `/bin/sh`.
+    /// Program to execute. `None` resolves to the platform's default shell
+    /// (see [`default_shell`]).
     pub program: Option<String>,
     /// Arguments passed directly to the program.
     pub args: Vec<String>,
@@ -511,6 +512,26 @@ impl TerminalOpenSpec {
         if let Some(program) = &self.program {
             return program.clone();
         }
+        default_shell()
+    }
+}
+
+/// The shell a session starts when the caller names no program.
+///
+/// Windows deliberately does not consult `SHELL`. It is unset for native
+/// processes, and the one common way it *is* set — a session started from an
+/// MSYS shell such as Git Bash — sets it to a path in MSYS's own filesystem
+/// namespace (`/usr/bin/bash`), which `CreateProcessW` cannot resolve. Honouring
+/// it would turn a working default into "the system cannot find the path
+/// specified" for precisely the users who have it set. `COMSPEC` is the
+/// variable Windows itself defines for this question.
+pub fn default_shell() -> String {
+    #[cfg(windows)]
+    {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+    }
+    #[cfg(not(windows))]
+    {
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
     }
 }
@@ -2028,6 +2049,88 @@ fn deliver_signal(
     }
 }
 
+/// Shell scaffolding shared by the tests in this crate.
+///
+/// Almost every test here has the runtime as its subject — leases, events,
+/// secret mode, the screen model — and wants a shell only as something on the
+/// far end that prints when written to. Naming one per platform is what keeps
+/// those tests running on both, so the Windows binary this crate ships is
+/// covered by the same suite instead of by none of it.
+///
+/// Windows runs `cmd.exe` with delayed expansion on, because that is the only
+/// mode where an *unset* variable expands to nothing. Plain `%VAR%` is left as
+/// literal text, so a test asserting a scrubbed variable would read back
+/// `TOKEN=[%VAR%]` and could not tell "expanded to empty" from "never expanded
+/// at all" — it would fail while the scrubbing it checks works fine. With
+/// `!VAR!` both platforms produce the same `TOKEN=[]`, so the assertions stay
+/// identical rather than forking per platform.
+///
+/// Note that the shell echoes what is typed into it, so a marker a test waits
+/// for must not appear in the command that produces it. That is why the
+/// variable reporters print `LABEL=[...]` from a placeholder rather than
+/// spelling the expected output in the command line.
+#[cfg(test)]
+pub(crate) mod test_shell {
+    use super::TerminalOpenSpec;
+
+    /// The shell binary, chosen for deterministic echo rather than taken from
+    /// the environment the test happens to run in.
+    pub(crate) fn program() -> String {
+        if cfg!(windows) {
+            std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+        } else {
+            "/bin/sh".to_string()
+        }
+    }
+
+    /// Arguments that start it interactively.
+    pub(crate) fn args() -> Vec<String> {
+        if cfg!(windows) {
+            vec!["/V:ON".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// An open spec for an interactive shell, for tests that then write to it.
+    pub(crate) fn spec() -> TerminalOpenSpec {
+        TerminalOpenSpec {
+            program: Some(program()),
+            args: args(),
+            ..TerminalOpenSpec::default()
+        }
+    }
+
+    /// Input that makes the shell print `marker` on a line of its own.
+    pub(crate) fn echo(marker: &str) -> Vec<u8> {
+        if cfg!(windows) {
+            format!("echo {marker}\r\n").into_bytes()
+        } else {
+            format!("printf '{marker}\\n'\n").into_bytes()
+        }
+    }
+
+    /// Input that makes the shell print `label=[value]` for an environment
+    /// variable, printing `label=[]` when it is unset — on both platforms.
+    pub(crate) fn echo_env(label: &str, var: &str) -> Vec<u8> {
+        if cfg!(windows) {
+            format!("echo {label}=[!{var}!]\r\n").into_bytes()
+        } else {
+            format!("printf '{label}=[%s]\\n' \"${var}\"\n").into_bytes()
+        }
+    }
+
+    /// Arguments that print `marker` once and exit, without an interactive
+    /// session in between.
+    pub(crate) fn echo_once_args(marker: &str) -> Vec<String> {
+        if cfg!(windows) {
+            vec!["/C".to_string(), format!("echo {marker}")]
+        } else {
+            vec!["-c".to_string(), format!("printf '{marker}\\n'")]
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2134,18 +2237,12 @@ mod tests {
 
     #[test]
     fn open_streams_host_written_marker() -> Result<(), TerminalError> {
-        // Use /bin/sh for deterministic `printf` support. The command is
-        // trusted host-side test setup.
+        // The shell and the command it is given are trusted host-side test
+        // setup; see `test_shell` for why they are chosen per platform.
         let mut manager = TerminalSessionManager::new();
-        let id = manager.open(
-            "t1",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
+        let id = manager.open("t1", test_shell::spec())?;
         let subscription = manager.subscribe(&id)?;
-        manager.write(&id, b"printf 'TERMINAL_READY\\n'\n")?;
+        manager.write(&id, &test_shell::echo("TERMINAL_READY"))?;
         assert!(
             wait_for(&subscription, "TERMINAL_READY", Duration::from_secs(5)),
             "expected TERMINAL_READY in the session byte stream"
@@ -2156,13 +2253,7 @@ mod tests {
     #[test]
     fn resize_updates_metadata() -> Result<(), TerminalError> {
         let mut manager = TerminalSessionManager::new();
-        let id = manager.open(
-            "t2",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
+        let id = manager.open("t2", test_shell::spec())?;
         manager.resize(&id, 50, 160)?;
         let meta = manager
             .metadata(&id)
@@ -2188,13 +2279,7 @@ mod tests {
             Err(TerminalError::InvalidDimensions { rows: 1, cols: 80 })
         ));
 
-        let id = manager.open(
-            "safe_geometry",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
+        let id = manager.open("safe_geometry", test_shell::spec())?;
         assert!(matches!(
             manager.resize(&id, 1, 35),
             Err(TerminalError::InvalidDimensions { rows: 1, cols: 35 })
@@ -2205,7 +2290,7 @@ mod tests {
         assert_eq!((meta.rows, meta.cols), (24, 80));
 
         let subscription = manager.subscribe(&id)?;
-        manager.write(&id, b"printf 'STILL_STREAMING\\n'\n")?;
+        manager.write(&id, &test_shell::echo("STILL_STREAMING"))?;
         assert!(
             wait_for(&subscription, "STILL_STREAMING", Duration::from_secs(5)),
             "a refused resize must leave the reader thread alive"
@@ -2216,13 +2301,7 @@ mod tests {
     #[test]
     fn kill_marks_exited() -> Result<(), TerminalError> {
         let mut manager = TerminalSessionManager::new();
-        let id = manager.open(
-            "t3",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
+        let id = manager.open("t3", test_shell::spec())?;
         manager.kill(&id)?;
         assert!(matches!(
             manager.status(&id),
@@ -2247,18 +2326,74 @@ mod tests {
     // any other test that happens to read the same variable name.
     static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// A caller that names no program must get a shell this platform can
+    /// actually execute.
+    ///
+    /// The Windows binary this crate ships used to fall back to `/bin/sh` — a
+    /// path that cannot exist there — so every session opened without an
+    /// explicit program failed with "the system cannot find the path
+    /// specified", which is to say the default way to use it did not work at
+    /// all. `open` returning an error is the whole symptom, so this test needs
+    /// no output to catch it.
+    #[test]
+    fn a_session_naming_no_program_opens_on_the_platform_shell() -> Result<(), TerminalError> {
+        let mut manager = TerminalSessionManager::new();
+        let id = manager.open("t_default_shell", TerminalOpenSpec::default())?;
+        assert!(
+            matches!(
+                manager.status(&id),
+                Some(TerminalSessionStatus::Running | TerminalSessionStatus::Exited(_))
+            ),
+            "a session opened with no program named must be a started process"
+        );
+        manager.close(&id)?;
+        Ok(())
+    }
+
+    /// `SHELL` is a POSIX convention, and on Windows the one common way it is
+    /// set — a session started from Git Bash or another MSYS shell — sets it to
+    /// a path in MSYS's filesystem namespace that `CreateProcessW` cannot
+    /// resolve. Honouring it there would break the default for exactly the
+    /// people who have it set, so Windows asks `COMSPEC` instead.
+    #[test]
+    fn the_default_shell_never_comes_from_an_msys_shell_variable() {
+        let _guard = ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let restore = std::env::var("SHELL").ok();
+        // SAFETY: serialized by ENV_TEST_LOCK, and restored below.
+        unsafe { std::env::set_var("SHELL", "/usr/bin/bash") };
+        let resolved = default_shell();
+        // SAFETY: same guard.
+        unsafe {
+            match &restore {
+                Some(value) => std::env::set_var("SHELL", value),
+                None => std::env::remove_var("SHELL"),
+            }
+        }
+        if cfg!(windows) {
+            assert_ne!(
+                resolved, "/usr/bin/bash",
+                "Windows must not take its default shell from SHELL"
+            );
+            assert!(
+                !resolved.starts_with('/'),
+                "a Windows default shell must not be a POSIX path, got {resolved}"
+            );
+        } else {
+            assert_eq!(
+                resolved, "/usr/bin/bash",
+                "a POSIX platform honours the shell the person actually uses"
+            );
+        }
+    }
+
     #[test]
     fn open_sets_afui_delivery_when_configured() -> Result<(), TerminalError> {
         let mut manager = TerminalSessionManager::new().with_afui_delivery("session");
-        let id = manager.open(
-            "afui_delivery_set",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
+        let id = manager.open("afui_delivery_set", test_shell::spec())?;
         let subscription = manager.subscribe(&id)?;
-        manager.write(&id, b"printf 'AFUI_DELIVERY=[%s]\\n' \"$AFUI_DELIVERY\"\n")?;
+        manager.write(&id, &test_shell::echo_env("AFUI_DELIVERY", "AFUI_DELIVERY"))?;
         assert!(
             wait_for(
                 &subscription,
@@ -2284,16 +2419,10 @@ mod tests {
         // reads or writes this name.
         unsafe { std::env::set_var(VAR, "a-persons-own-export") };
         let mut manager = TerminalSessionManager::new(); // no with_afui_delivery
-        let opened = manager.open(
-            "afui_delivery_unset",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        );
+        let opened = manager.open("afui_delivery_unset", test_shell::spec());
         let result = opened.and_then(|id| {
             let subscription = manager.subscribe(&id)?;
-            manager.write(&id, b"printf 'AFUI_DELIVERY=[%s]\\n' \"$AFUI_DELIVERY\"\n")?;
+            manager.write(&id, &test_shell::echo_env("AFUI_DELIVERY", "AFUI_DELIVERY"))?;
             Ok(wait_for(
                 &subscription,
                 "AFUI_DELIVERY=[a-persons-own-export]",
@@ -2315,13 +2444,12 @@ mod tests {
         let id = manager.open(
             "afui_delivery_override",
             TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
                 env: BTreeMap::from([("AFUI_DELIVERY".to_string(), "window".to_string())]),
-                ..TerminalOpenSpec::default()
+                ..test_shell::spec()
             },
         )?;
         let subscription = manager.subscribe(&id)?;
-        manager.write(&id, b"printf 'AFUI_DELIVERY=[%s]\\n' \"$AFUI_DELIVERY\"\n")?;
+        manager.write(&id, &test_shell::echo_env("AFUI_DELIVERY", "AFUI_DELIVERY"))?;
         assert!(
             wait_for(
                 &subscription,
@@ -2353,19 +2481,10 @@ mod tests {
         // reads or writes this name.
         unsafe { std::env::set_var(VAR, "seen-by-child") };
         let mut manager = TerminalSessionManager::new();
-        let opened = manager.open(
-            "env_inherit",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        );
+        let opened = manager.open("env_inherit", test_shell::spec());
         let result = opened.and_then(|id| {
             let subscription = manager.subscribe(&id)?;
-            manager.write(
-                &id,
-                format!("printf '{VAR}=[%s]\\n' \"${VAR}\"\n").as_bytes(),
-            )?;
+            manager.write(&id, &test_shell::echo_env(VAR, VAR))?;
             Ok(wait_for(
                 &subscription,
                 &format!("{VAR}=[seen-by-child]"),
@@ -2397,36 +2516,23 @@ mod tests {
         let opened = manager.open(
             "api_env_scrub",
             TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
                 api_requested: true,
-                ..TerminalOpenSpec::default()
+                ..test_shell::spec()
             },
         );
         let scrubbed = opened.and_then(|id| {
             let subscription = manager.subscribe(&id)?;
-            manager.write(
-                &id,
-                format!("printf 'TOKEN=[%s]\\n' \"${VAR}\"\n").as_bytes(),
-            )?;
+            manager.write(&id, &test_shell::echo_env("TOKEN", VAR))?;
             Ok(wait_for(&subscription, "TOKEN=[]", Duration::from_secs(5)))
         });
 
         // A session the operator starts still inherits their environment —
         // that is what nested `afterminal ui` runs on.
         let inherited = manager
-            .open(
-                "local_env_keeps",
-                TerminalOpenSpec {
-                    program: Some("/bin/sh".to_string()),
-                    ..TerminalOpenSpec::default()
-                },
-            )
+            .open("local_env_keeps", test_shell::spec())
             .and_then(|id| {
                 let subscription = manager.subscribe(&id)?;
-                manager.write(
-                    &id,
-                    format!("printf 'TOKEN=[%s]\\n' \"${VAR}\"\n").as_bytes(),
-                )?;
+                manager.write(&id, &test_shell::echo_env("TOKEN", VAR))?;
                 Ok(wait_for(
                     &subscription,
                     "TOKEN=[the-api-bearer]",
@@ -2453,9 +2559,8 @@ mod tests {
         let id = manager.open(
             "program_args",
             TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                args: vec!["-c".to_string(), "printf 'PROGRAM_ARGS\\n'".to_string()],
-                ..TerminalOpenSpec::default()
+                args: test_shell::echo_once_args("PROGRAM_ARGS"),
+                ..test_shell::spec()
             },
         )?;
         let subscription = manager.subscribe(&id)?;
@@ -2479,14 +2584,8 @@ mod tests {
     #[test]
     fn screen_snapshot_contains_output() -> Result<(), TerminalError> {
         let mut manager = TerminalSessionManager::new();
-        let id = manager.open(
-            "t_screen",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
-        manager.write(&id, b"printf 'PHASE2\\n'\n")?;
+        let id = manager.open("t_screen", test_shell::spec())?;
+        manager.write(&id, &test_shell::echo("PHASE2"))?;
 
         // Poll until the output appears in the screen snapshot.
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -2515,13 +2614,12 @@ mod tests {
         let id = manager.open(
             "t_resize",
             TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
                 rows: 24,
                 cols: 80,
-                ..TerminalOpenSpec::default()
+                ..test_shell::spec()
             },
         )?;
-        manager.write(&id, b"printf 'test\\n'\n")?;
+        manager.write(&id, &test_shell::echo("test"))?;
 
         // Wait for initial output to stabilize.
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -2568,14 +2666,8 @@ mod tests {
     #[test]
     fn screen_snapshot_quiescence() -> Result<(), TerminalError> {
         let mut manager = TerminalSessionManager::new();
-        let id = manager.open(
-            "t_quiescent",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
-        manager.write(&id, b"printf 'test\\n'\n")?;
+        let id = manager.open("t_quiescent", test_shell::spec())?;
+        manager.write(&id, &test_shell::echo("test"))?;
 
         // Wait for output and verify activity is recent.
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -2610,19 +2702,13 @@ mod tests {
     #[test]
     fn events_stream_output_and_screen_changed() -> Result<(), TerminalError> {
         let mut manager = TerminalSessionManager::new();
-        let id = manager.open(
-            "t_events",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
+        let id = manager.open("t_events", test_shell::spec())?;
         // Subscribe after open: `subscribe_events` has no per-session backlog
         // guarantee for events emitted before subscribing, so this test opens
         // first, subscribes, then writes and asserts only on events produced
         // by that write.
         let subscription = manager.subscribe_events();
-        manager.write(&id, b"printf 'EVT\\n'\n")?;
+        manager.write(&id, &test_shell::echo("EVT"))?;
 
         let mut last_seq = 0u64;
         let mut seen_output_chunk = false;
@@ -2654,13 +2740,7 @@ mod tests {
     #[test]
     fn resize_emits_resized_event() -> Result<(), TerminalError> {
         let mut manager = TerminalSessionManager::new();
-        let id = manager.open(
-            "t_resize_event",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
+        let id = manager.open("t_resize_event", test_shell::spec())?;
         let subscription = manager.subscribe_events();
         manager.resize(&id, 50, 160)?;
 
@@ -2679,25 +2759,13 @@ mod tests {
     #[test]
     fn events_multiplex_across_sessions() -> Result<(), TerminalError> {
         let mut manager = TerminalSessionManager::new();
-        let id_a = manager.open(
-            "t_multi_a",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
-        let id_b = manager.open(
-            "t_multi_b",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
+        let id_a = manager.open("t_multi_a", test_shell::spec())?;
+        let id_b = manager.open("t_multi_b", test_shell::spec())?;
         // One global subscription watches both sessions at once — the core
         // "watch many consoles" guarantee.
         let subscription = manager.subscribe_events();
-        manager.write(&id_a, b"printf 'FROM_A\\n'\n")?;
-        manager.write(&id_b, b"printf 'FROM_B\\n'\n")?;
+        manager.write(&id_a, &test_shell::echo("FROM_A"))?;
+        manager.write(&id_b, &test_shell::echo("FROM_B"))?;
 
         let mut seen_a = false;
         let mut seen_b = false;
@@ -2729,13 +2797,7 @@ mod tests {
     #[test]
     fn shared_agents_write_and_human_preempts_exclusive_input() -> Result<(), TerminalError> {
         let mut manager = TerminalSessionManager::new();
-        let session_id = manager.open(
-            "t_multi_actor",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
+        let session_id = manager.open("t_multi_actor", test_shell::spec())?;
         let output = manager.subscribe(&session_id)?;
         let agent_a = InputActor {
             kind: InputActorKind::Agent,
@@ -2768,7 +2830,7 @@ mod tests {
             &session_id,
             agent_a.clone(),
             Some(&lease_a.lease_id),
-            b"printf 'ACTOR_A\\n'\n",
+            &test_shell::echo("ACTOR_A"),
         )?;
         assert!(
             wait_for(&output, "ACTOR_A", Duration::from_secs(5)),
@@ -2778,7 +2840,7 @@ mod tests {
             &session_id,
             agent_b.clone(),
             Some(&lease_b.lease_id),
-            b"printf 'ACTOR_B\\n'\n",
+            &test_shell::echo("ACTOR_B"),
         )?;
         assert!(
             wait_for(&output, "ACTOR_B", Duration::from_secs(5)),
@@ -2811,7 +2873,7 @@ mod tests {
             &session_id,
             human.clone(),
             None,
-            b"printf 'HUMAN_PREEMPTED\\n'\n",
+            &test_shell::echo("HUMAN_PREEMPTED"),
         )?;
         assert!(
             wait_for(&output, "HUMAN_PREEMPTED", Duration::from_secs(5)),
@@ -2822,7 +2884,7 @@ mod tests {
                 &session_id,
                 agent_a.clone(),
                 Some(&exclusive.lease_id),
-                b"printf 'SHOULD_NOT_RUN\\n'\n",
+                &test_shell::echo("SHOULD_NOT_RUN"),
             ),
             Err(TerminalError::InputLeaseNotFound { .. })
         ));
@@ -2860,13 +2922,7 @@ mod tests {
     #[test]
     fn expired_agent_lease_rejects_input() -> Result<(), TerminalError> {
         let mut manager = TerminalSessionManager::new();
-        let session_id = manager.open(
-            "t_lease_expiry",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
+        let session_id = manager.open("t_lease_expiry", test_shell::spec())?;
         let agent = InputActor {
             kind: InputActorKind::Agent,
             id: "expiring-agent".to_string(),
@@ -2886,7 +2942,7 @@ mod tests {
                 &session_id,
                 agent.clone(),
                 Some(&lease.lease_id),
-                b"printf 'EXPIRED\\n'\n",
+                &test_shell::echo("EXPIRED"),
             ),
             Err(TerminalError::InputLeaseNotFound { .. })
         ));
@@ -3010,13 +3066,7 @@ mod tests {
     fn secret_mode_withholds_output_and_suspends_agents() -> Result<(), TerminalError> {
         const SECRET: &str = "correct-horse-battery-staple";
         let mut manager = TerminalSessionManager::new();
-        let id = manager.open(
-            "t_secret",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
+        let id = manager.open("t_secret", test_shell::spec())?;
         let human = InputActor {
             kind: InputActorKind::Human,
             id: "human-a".to_string(),
@@ -3031,7 +3081,7 @@ mod tests {
         let events = manager.subscribe_events();
 
         // Before the window: this session publishes normally.
-        manager.write_as(&id, human.clone(), None, b"printf 'BEFORE_SECRET\\n'\n")?;
+        manager.write_as(&id, human.clone(), None, &test_shell::echo("BEFORE_SECRET"))?;
         assert!(
             drain_until(&output, "BEFORE_SECRET", Duration::from_secs(5)).is_some(),
             "the session was not publishing before secret mode"
@@ -3066,8 +3116,8 @@ mod tests {
         ));
 
         // The person types the secret, and the shell echoes it right back.
-        let secret_input = format!("printf '{SECRET}\\n'\n");
-        manager.write_as(&id, human.clone(), None, secret_input.as_bytes())?;
+        let secret_input = test_shell::echo(SECRET);
+        manager.write_as(&id, human.clone(), None, &secret_input)?;
 
         // While the window is open the screen is withheld, not stale-looking.
         let screen = manager
@@ -3090,7 +3140,7 @@ mod tests {
                 Err(error) => return Err(error),
             }
         }
-        manager.write_as(&id, human.clone(), None, b"printf 'AFTER_SECRET\\n'\n")?;
+        manager.write_as(&id, human.clone(), None, &test_shell::echo("AFTER_SECRET"))?;
 
         // AFTER_SECRET is the barrier: once it arrives, everything the PTY
         // produced during the window has already been through the reader.
@@ -3162,13 +3212,7 @@ mod tests {
     #[test]
     fn kill_emits_process_exited_event() -> Result<(), TerminalError> {
         let mut manager = TerminalSessionManager::new();
-        let id = manager.open(
-            "t_kill_event",
-            TerminalOpenSpec {
-                program: Some("/bin/sh".to_string()),
-                ..TerminalOpenSpec::default()
-            },
-        )?;
+        let id = manager.open("t_kill_event", test_shell::spec())?;
         let subscription = manager.subscribe_events();
         manager.kill(&id)?;
 

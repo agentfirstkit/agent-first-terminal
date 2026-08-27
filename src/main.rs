@@ -1128,7 +1128,7 @@ fn ui_session_subject(initial_session: Option<&InitialSession>) -> String {
     let program = spec
         .and_then(|spec| spec.program.as_deref())
         .map(str::to_string)
-        .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()));
+        .unwrap_or_else(agent_first_terminal::default_shell);
     let cwd = spec
         .and_then(|spec| spec.cwd.clone())
         .or_else(|| std::env::current_dir().ok());

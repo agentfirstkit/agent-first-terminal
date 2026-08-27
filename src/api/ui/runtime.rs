@@ -457,20 +457,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn human_ui_input_preempts_an_agent_exclusive_lease() {
-        use crate::{
-            InputActor, InputActorKind, InputLeaseMode, TerminalOpenSpec, TerminalSessionManager,
-        };
+        use crate::{InputActor, InputActorKind, InputLeaseMode, TerminalSessionManager};
 
         let session_id = "ui_human";
         let mut manager = TerminalSessionManager::new();
         manager
-            .open(
-                session_id.to_string(),
-                TerminalOpenSpec {
-                    program: Some("/bin/sh".to_string()),
-                    ..TerminalOpenSpec::default()
-                },
-            )
+            .open(session_id.to_string(), crate::test_shell::spec())
             .expect("session opens");
         manager
             .acquire_lease(
