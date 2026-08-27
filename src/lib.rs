@@ -2209,6 +2209,41 @@ pub(crate) mod test_shell {
         }
     }
 
+    /// Marker closing an environment report, on the same line as the value.
+    pub(crate) const REPORT_END: &str = "ENV_REPORT_END";
+
+    /// Arguments that report one environment variable and exit, with no
+    /// interactive session in between.
+    ///
+    /// Running the report *as the program* rather than typing it into a shell
+    /// is what makes a negative assertion safe here: a shell echoes what is
+    /// typed into it, so a typed command naming the variable puts the very text
+    /// under test into the output whether or not it ever ran. Nothing is typed
+    /// this way, so the only output is the report.
+    ///
+    /// The end marker rides on the same line as the value, so seeing it proves
+    /// the value was emitted in full rather than merely started — a reader that
+    /// stopped at `LABEL=[` could be looking at output the rest of which has not
+    /// arrived.
+    ///
+    /// Windows uses plain `%VAR%` because this form is not interactive: an
+    /// unset variable is left as literal text on both platforms, which is why
+    /// the assertions are written against the value rather than against
+    /// emptiness.
+    pub(crate) fn env_report_args(label: &str, var: &str) -> Vec<String> {
+        if cfg!(windows) {
+            vec![
+                "/C".to_string(),
+                format!("echo {label}=[%{var}%]{REPORT_END}"),
+            ]
+        } else {
+            vec![
+                "-c".to_string(),
+                format!("printf '{label}=[%s]{REPORT_END}\\n' \"${var}\""),
+            ]
+        }
+    }
+
     /// Arguments that print `marker` once and exit, without an interactive
     /// session in between.
     pub(crate) fn echo_once_args(marker: &str) -> Vec<String> {
@@ -2414,56 +2449,6 @@ mod tests {
     // (`std::env::set_var`/`remove_var`), so they cannot race each other or
     // any other test that happens to read the same variable name.
     static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    #[cfg(windows)]
-    #[test]
-    fn diagnose_credential_scrub() {
-        const VAR: &str = "AFTERMINAL_API_ACCESS_TOKEN_SECRET";
-        fn collect(sub: &TerminalSubscription, ms: u64) -> String {
-            let mut acc = sub.backlog.clone();
-            let deadline = Instant::now() + Duration::from_millis(ms);
-            while Instant::now() < deadline {
-                if let Ok(chunk) = sub.receiver.recv_timeout(Duration::from_millis(100)) {
-                    acc.extend_from_slice(&chunk);
-                }
-            }
-            String::from_utf8_lossy(&acc).escape_debug().to_string()
-        }
-        let _guard = ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        unsafe { std::env::set_var(VAR, "the-api-bearer") };
-        let mut report = String::new();
-        let mut manager = TerminalSessionManager::new();
-
-        let scrubbed = manager
-            .open(
-                "diag_scrub",
-                TerminalOpenSpec {
-                    api_requested: true,
-                    ..test_shell::spec()
-                },
-            )
-            .expect("scrubbed session opens");
-        let sub_a = manager.subscribe(&scrubbed).expect("subscribe a");
-        manager
-            .write(&scrubbed, &test_shell::echo_env("TOKEN", VAR))
-            .expect("write a");
-        report.push_str(&format!("WROTE={:?}\n", String::from_utf8_lossy(&test_shell::echo_env("TOKEN", VAR))));
-        report.push_str(&format!("SCRUBBED_RAW=[{}]\n", collect(&sub_a, 4000)));
-        report.push_str(&format!("SCRUBBED_SCREEN={:?}\n", manager.screen(&scrubbed).map(|s| s.lines)));
-
-        let kept = manager
-            .open("diag_keep", test_shell::spec())
-            .expect("inheriting session opens");
-        let sub_b = manager.subscribe(&kept).expect("subscribe b");
-        manager
-            .write(&kept, &test_shell::echo_env("TOKEN", VAR))
-            .expect("write b");
-        report.push_str(&format!("KEPT_RAW=[{}]\n", collect(&sub_b, 4000)));
-        unsafe { std::env::remove_var(VAR) };
-        panic!("CREDENTIAL SCRUB DIAGNOSTIC\n{report}");
-    }
 
     fn query_replies(parser: &mut vt100::Parser<TerminalQueries>) -> Vec<String> {
         std::mem::take(&mut parser.callbacks_mut().replies)
@@ -2702,50 +2687,59 @@ mod tests {
         // The bearer that opens sessions can name any program, so a shell it
         // starts must not be able to read that bearer out of its own
         // environment and then drive every session on the host.
+        //
+        // The property is that the *value* never reaches the child, which is
+        // what is asserted — not that the variable reads back empty. An unset
+        // variable is left as literal text by both shells, so emptiness was
+        // never the observable thing, and a report claiming it would only be
+        // describing one platform's substitution rules.
         const VAR: &str = "AFTERMINAL_API_ACCESS_TOKEN_SECRET";
+        const BEARER: &str = "the-api-bearer";
         let _guard = ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // SAFETY: serialized by ENV_TEST_LOCK.
-        unsafe { std::env::set_var(VAR, "the-api-bearer") };
+        unsafe { std::env::set_var(VAR, BEARER) };
 
         let mut manager = TerminalSessionManager::new();
-        let opened = manager.open(
-            "api_env_scrub",
-            TerminalOpenSpec {
-                api_requested: true,
-                ..test_shell::spec()
-            },
-        );
-        let scrubbed = opened.and_then(|id| {
+        let report = |manager: &mut TerminalSessionManager,
+                      id: &str,
+                      api_requested: bool|
+         -> Result<Option<String>, TerminalError> {
+            let id = manager.open(
+                id,
+                TerminalOpenSpec {
+                    args: test_shell::env_report_args("TOKEN", VAR),
+                    api_requested,
+                    ..test_shell::spec()
+                },
+            )?;
             let subscription = manager.subscribe(&id)?;
-            manager.write(&id, &test_shell::echo_env("TOKEN", VAR))?;
-            Ok(wait_for(&subscription, "TOKEN=[]", Duration::from_secs(5)))
-        });
+            Ok(drain_until(
+                &subscription,
+                test_shell::REPORT_END,
+                Duration::from_secs(5),
+            ))
+        };
+        let scrubbed = report(&mut manager, "api_env_scrub", true);
 
         // A session the operator starts still inherits their environment —
-        // that is what nested `afterminal ui` runs on.
-        let inherited = manager
-            .open("local_env_keeps", test_shell::spec())
-            .and_then(|id| {
-                let subscription = manager.subscribe(&id)?;
-                manager.write(&id, &test_shell::echo_env("TOKEN", VAR))?;
-                Ok(wait_for(
-                    &subscription,
-                    "TOKEN=[the-api-bearer]",
-                    Duration::from_secs(5),
-                ))
-            });
+        // that is what nested `afterminal ui` runs on. It is also the control:
+        // without it, a report that never ran would read as a scrubbed one.
+        let inherited = report(&mut manager, "local_env_keeps", false);
 
         // SAFETY: same guard.
         unsafe { std::env::remove_var(VAR) };
+
+        let scrubbed = scrubbed?.expect("the scrubbed session reported its environment");
         assert!(
-            scrubbed?,
-            "a session opened over the API must not carry the API credential"
+            !scrubbed.contains(BEARER),
+            "a session opened over the API must not carry the API credential: {scrubbed}"
         );
+        let inherited = inherited?.expect("the local session reported its environment");
         assert!(
-            inherited?,
-            "a locally opened session still inherits the operator's environment"
+            inherited.contains(&format!("TOKEN=[{BEARER}]")),
+            "a locally opened session still inherits the operator's environment: {inherited}"
         );
         Ok(())
     }
