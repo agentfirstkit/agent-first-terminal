@@ -79,6 +79,18 @@ def shell_program() -> str:
     return "/bin/sh"
 
 
+def shell_args() -> list[str]:
+    """Arguments that start that shell interactively.
+
+    Windows enables delayed expansion so an unset variable expands to nothing
+    rather than to its own name, which is what lets a report read the same on
+    both platforms.
+    """
+    if WINDOWS:
+        return ["/V:ON"]
+    return []
+
+
 def write_python_launcher(directory: Path, name: str, source: str) -> str:
     """Write a Python launcher and return the path to hand to a caller.
 

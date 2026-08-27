@@ -198,6 +198,22 @@ def wait_for_marker(api_url: str, session_id: str, marker: str) -> None:
     raise RuntimeError(f"terminal {session_id} never displayed {marker}")
 
 
+def wait_for_status(api_url: str, session_id: str, expected: str) -> None:
+    deadline = time.monotonic() + 5
+    seen = None
+    while time.monotonic() < deadline:
+        status, listed = request(api_url, "GET", "/v1/sessions")
+        if status != 200 or not isinstance(listed, dict):
+            raise RuntimeError(f"session list failed: {status} {listed}")
+        for session in listed.get("sessions", []):
+            if session.get("session_id") == session_id:
+                seen = session.get("status")
+                if seen == expected:
+                    return
+        time.sleep(0.05)
+    raise RuntimeError(f"terminal {session_id} never reached {expected} (saw {seen})")
+
+
 def secret_input_never_leaves_the_runtime(api_url: str) -> None:
     """Type a secret into a live session and prove it reached nobody.
 
@@ -544,43 +560,98 @@ def main() -> int:
                 raise RuntimeError(f"close {session_id} failed: {status} {result}")
 
         signal_session_id = "external_signal"
-        status, result = request(
-            api_url,
-            "POST",
-            "/v1/sessions",
-            {
-                "session_id": signal_session_id,
-                "program": smoke_support.shell_program(),
-                "args": [
-                    "-c",
-                    "trap 'printf \"EXTERNAL_INTERRUPTED\\n\"; exit 0' INT; "
-                    "printf 'EXTERNAL_SIGNAL_READY\\n'; "
-                    "while :; do sleep 1; done",
-                ],
-            },
-        )
-        if status != 200:
-            raise RuntimeError(f"open signal session failed: {status} {result}")
-        wait_for_marker(api_url, signal_session_id, "EXTERNAL_SIGNAL_READY")
+        if smoke_support.WINDOWS:
+            # Windows has no signal to send a process group: `deliver_signal`
+            # there supports `kill` and refuses the rest. That refusal is the
+            # platform's contract rather than a gap in the smoke, so it is what
+            # gets asserted — a caller has to be able to tell "this terminal
+            # will not interrupt" from "this terminal did not answer".
+            status, result = request(
+                api_url,
+                "POST",
+                "/v1/sessions",
+                {
+                    "session_id": signal_session_id,
+                    "program": smoke_support.shell_program(),
+                    "args": smoke_support.shell_args(),
+                },
+            )
+            if status != 200:
+                raise RuntimeError(f"open signal session failed: {status} {result}")
 
-        status, result = request(
-            api_url,
-            "POST",
-            f"/v1/sessions/{signal_session_id}/signal",
-            {
-                "actor": {"kind": "controller", "id": "smoke-controller"},
-                "lease_id": controller_lease(api_url, signal_session_id),
-                "signal": "interrupt",
-            },
-        )
-        if (
-            status != 200
-            or not isinstance(result, dict)
-            or result.get("delivered") is not True
-            or result.get("signal") != "interrupt"
-        ):
-            raise RuntimeError(f"interrupt signal failed: {status} {result}")
-        wait_for_marker(api_url, signal_session_id, "EXTERNAL_INTERRUPTED")
+            lease_id = controller_lease(api_url, signal_session_id)
+            status, result = request(
+                api_url,
+                "POST",
+                f"/v1/sessions/{signal_session_id}/signal",
+                {
+                    "actor": {"kind": "controller", "id": "smoke-controller"},
+                    "lease_id": lease_id,
+                    "signal": "interrupt",
+                },
+            )
+            if status != 501 or not isinstance(result, dict):
+                raise RuntimeError(f"interrupt was not refused: {status} {result}")
+            if result.get("error", {}).get("code") != "signal_not_supported":
+                raise RuntimeError(f"interrupt refused with the wrong error: {result}")
+
+            # `kill` is the one this platform does deliver.
+            status, result = request(
+                api_url,
+                "POST",
+                f"/v1/sessions/{signal_session_id}/signal",
+                {
+                    "actor": {"kind": "controller", "id": "smoke-controller"},
+                    "lease_id": lease_id,
+                    "signal": "kill",
+                },
+            )
+            if (
+                status != 200
+                or not isinstance(result, dict)
+                or result.get("delivered") is not True
+                or result.get("signal") != "kill"
+            ):
+                raise RuntimeError(f"kill signal failed: {status} {result}")
+            wait_for_status(api_url, signal_session_id, "exited")
+        else:
+            status, result = request(
+                api_url,
+                "POST",
+                "/v1/sessions",
+                {
+                    "session_id": signal_session_id,
+                    "program": smoke_support.shell_program(),
+                    "args": [
+                        "-c",
+                        "trap 'printf \"EXTERNAL_INTERRUPTED\\n\"; exit 0' INT; "
+                        "printf 'EXTERNAL_SIGNAL_READY\\n'; "
+                        "while :; do sleep 1; done",
+                    ],
+                },
+            )
+            if status != 200:
+                raise RuntimeError(f"open signal session failed: {status} {result}")
+            wait_for_marker(api_url, signal_session_id, "EXTERNAL_SIGNAL_READY")
+
+            status, result = request(
+                api_url,
+                "POST",
+                f"/v1/sessions/{signal_session_id}/signal",
+                {
+                    "actor": {"kind": "controller", "id": "smoke-controller"},
+                    "lease_id": controller_lease(api_url, signal_session_id),
+                    "signal": "interrupt",
+                },
+            )
+            if (
+                status != 200
+                or not isinstance(result, dict)
+                or result.get("delivered") is not True
+                or result.get("signal") != "interrupt"
+            ):
+                raise RuntimeError(f"interrupt signal failed: {status} {result}")
+            wait_for_marker(api_url, signal_session_id, "EXTERNAL_INTERRUPTED")
 
         status, result = request(
             api_url,
