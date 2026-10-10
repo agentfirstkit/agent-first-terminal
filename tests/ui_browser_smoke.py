@@ -119,6 +119,9 @@ class Chromium:
         # exact CSS viewport dimensions set device metrics before navigation
         # and verify the resulting dimensions independently.
         sizing = [f"--window-size={window_size[0]},{window_size[1]}"] if window_size else []
+        # Kept so a browser that exits can say why, instead of the pipe going
+        # quiet until a call times out.
+        self._stderr = tempfile.TemporaryFile()
         self.process = subprocess.Popen(
             [
                 binary,
@@ -134,7 +137,7 @@ class Chromium:
             pass_fds=(3, 4),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=self._stderr,
         )
         for fd, saved in self._saved.items():
             if saved is None:
@@ -164,8 +167,20 @@ class Chromium:
                 if "error" in reply:
                     raise RuntimeError(f"{method} failed: {reply['error']}")
                 return reply.get("result", {})
-            self._buffer += os.read(self._read, 65536)
+            chunk = os.read(self._read, 65536)
+            if not chunk:
+                raise RuntimeError(f"the browser closed its pipe during {method}: {self.exit_report()}")
+            self._buffer += chunk
         raise RuntimeError(f"timed out waiting for {method}")
+
+    def exit_report(self) -> str:
+        try:
+            code = self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            code = None
+        self._stderr.seek(0)
+        tail = self._stderr.read().decode(errors="replace")[-2000:]
+        return f"exit status {code}; stderr: {tail!r}"
 
     def attach_to_page(self, timeout: float = 30.0, with_target: bool = False):
         """The page's CDP session, and its target id when the caller needs it.
@@ -218,6 +233,7 @@ class Chromium:
                 os.close(fd)
             except OSError:
                 pass
+        self._stderr.close()
 
 
 def find_chromium() -> str | None:

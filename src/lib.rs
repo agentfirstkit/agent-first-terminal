@@ -2920,7 +2920,9 @@ mod tests {
             .unwrap();
         manager.close(&id).unwrap();
         let deadline = Instant::now() + Duration::from_secs(1);
-        while retained_shared.upgrade().is_some() && Instant::now() < deadline {
+        while (retained_shared.upgrade().is_some() || retained_writer.upgrade().is_some())
+            && Instant::now() < deadline
+        {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(
