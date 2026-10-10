@@ -47,6 +47,13 @@ jobs:
       - name: Validate Agent Skill
         run: afdata skill validate skills/agent-first-terminal
 
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor,
+      # and Chromium's sandbox needs them: without this the real-browser smoke's
+      # Chromium aborts at launch. Lift the restriction on this disposable
+      # runner rather than run the browser unsandboxed.
+      - name: Allow Chromium's sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       # Run the release gate itself rather than a hand-written command list:
       # Step 0 of a release is `projects.sh test agent-first-terminal all`,
       # which execs this same script, so anything that can fail a release fails
