@@ -600,6 +600,24 @@ def main() -> int:
                     f"ending a drag moved focus and collapsed it (selected {during} "
                     f"while dragging, {held} after release, over {geometry})"
                 )
+            # What the screen looked like, so a lost selection can say whether
+            # the selected row was redrawn or the whole grid was rebuilt. The
+            # row is remembered by identity: marking it would itself make the
+            # next frame replace it.
+            screen_shape = (
+                "(() => { const grid = document.querySelector('#terminal .terminal-screen');"
+                " const first = grid?.children[0];"
+                " return JSON.stringify({rows: grid?.children.length,"
+                " cols: grid?.style.getPropertyValue('--terminal-cols'),"
+                " first_row: first?.textContent,"
+                " same_first_row_node: first === window.__smokeFirstRow,"
+                " remembered: Boolean(window.__smokeFirstRow ||= first)});"
+                " })()"
+            )
+            before = chromium.call(
+                "Runtime.evaluate", {"expression": screen_shape, "returnByValue": True},
+                session=page,
+            )["result"]["value"]
             time.sleep(4)
             still = chromium.call(
                 "Runtime.evaluate",
@@ -607,12 +625,33 @@ def main() -> int:
                 session=page,
             )["result"]["value"]
             if not still:
+                after = chromium.call(
+                    "Runtime.evaluate", {"expression": screen_shape, "returnByValue": True},
+                    session=page,
+                )["result"]["value"]
                 raise RuntimeError(
                     "the selection was gone after the screen refreshed: output that "
                     f"cannot be held cannot be copied (held {held} on release, {still} "
-                    "four seconds later)"
+                    f"four seconds later; screen before {before}, after {after})"
                 )
 
+
+            # A drag that selected output leaves the input unfocused on purpose,
+            # so the selection survives. A person taps the terminal before
+            # typing again; without that tap, where the next keys land is up to
+            # the platform's focus rules.
+            click_element(chromium, page, "#terminal")
+            time.sleep(0.2)
+            focused = chromium.call(
+                "Runtime.evaluate",
+                {"expression": "document.activeElement?.className || ''",
+                 "returnByValue": True},
+                session=page,
+            )["result"]["value"]
+            if focused != "terminal-input":
+                raise RuntimeError(
+                    f"a tap after selecting did not focus the terminal input: {focused!r}"
+                )
 
             # Ctrl from the key bar, then a letter: the phone path to a signal,
             # which has no keyboard shortcut to fall back on.
