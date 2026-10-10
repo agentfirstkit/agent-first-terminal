@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-terminal"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Let your AI agent work in a real terminal you can watch — and take the keyboard back whenever you want, from your phone if you are not at the machine."
 license = "MIT"
@@ -14,6 +14,7 @@ include = [
     "openapi/**",
     "scripts/test.sh",
     "scripts/release-smoke.sh",
+    "build.rs",
     "Cargo.toml",
     "README.md",
     "LICENSE",
@@ -21,7 +22,10 @@ include = [
 ]
 
 [features]
-default = []
+# The release packages are built from the default set, so a plain `cargo
+# install` gets the same CLI they ship. A library consumer that wants only the
+# std core takes `default-features = false`.
+default = ["api"]
 api = [
     "dep:agent-first-data",
     "agent-first-data/skill-admin",
@@ -44,11 +48,11 @@ required-features = ["api"]
 [dependencies]
 # yaml/toml/dotenv/ini are what `--access-token-secret file:PATH#DOT_PATH` reads
 # out of; without them the source is advertised and cannot be honored.
-agent-first-data = { version = "0.34.0", default-features = false, features = ["cli", "yaml", "toml", "dotenv", "ini"], optional = true }
+agent-first-data = { version = "0.35.0", default-features = false, features = ["cli", "yaml", "toml", "dotenv", "ini"], optional = true }
 # `session`: the terminal window is a served AFUI session with a credential of
 # its own. `page`: the frontend's template is assembled and checked by AFUI's
 # `UiPage` rather than afterminal driving MiniJinja itself.
-agent-first-ui = { version = "0.5.0", default-features = false, optional = true }
+agent-first-ui = { version = "0.6.1", default-features = false, optional = true }
 axum = { version = "0.8", optional = true }
 base64 = { version = "0.23", optional = true }
 portable-pty = "0.9"
@@ -65,7 +69,7 @@ libc = "0.2"
 [dev-dependencies]
 # `test-support` rather than a second copy of AFUI's fingerprint, trust store,
 # stub browser, WebSocket framing, or runtime envelope in this spore's tests.
-agent-first-ui = { version = "0.5.0", default-features = false, features = ["test-support"] }
+agent-first-ui = { version = "0.6.1", default-features = false, features = ["test-support"] }
 serde_json = "1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

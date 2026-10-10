@@ -21,6 +21,14 @@ preemption. Browser input from the stock page is identified as
 `human:local-ui`, so opening the window and typing preempts an agent without any
 further ceremony.
 
+Each chunk is authorised under the manager lock, then written under that
+session's writer lock. A blocked PTY write does not hold the manager lock or
+prevent reading, closing, or coordinating other sessions. HTTP writes run on a
+blocking task rather than a Tokio worker. The stock UI also keeps processing
+events and actions for other sessions while an input write is pending.
+A later lease change does not cancel
+a chunk whose write was already authorised.
+
 ## Secret input mode
 
 While a session is in secret input mode it publishes nothing derived from the
@@ -37,6 +45,16 @@ Any actor may enter secret mode — raising the shield is the safe direction. On
 a human actor may leave it, and leaving waits for the session to fall quiet so
 the echo of what was just typed is not released as publication resumes. Entry
 and exit are both events, and the stock page marks the state unmistakably.
+
+After a secret window closes, the screen starts blank and contains only new
+output. Application cursor, bracketed paste, and alternate screen modes are
+preserved. Ask the program to redraw (for example, Ctrl-L) for a full picture.
+
+Secret input boundaries cannot move across a chunk that is still being written.
+Starting or ending a window in that interval returns retryable
+`input_in_progress`; retry after the write completes. This keeps already
+authorised input outside a newly opened window and keeps private input volume
+private even when a write fails.
 
 ## Composing with an input method
 
@@ -76,8 +94,40 @@ Callers can:
 - watch every session's events over one SSE stream that resumes from
   `Last-Event-ID`.
 
+On Windows, only `kill` is supported: it terminates the process started for
+the session, rather than the foreground process group. `interrupt` and
+`terminate` return `signal_not_supported`.
+
 Domain responses are AFDATA envelopes and pass through AFDATA redaction on the
 way out.
+
+The SSE stream retains the newest 512 terminal events. With no `Last-Event-ID`
+it sends that backlog and then live events; with a valid cursor still inside
+the replay window it sends only events after that cursor. An unsigned decimal
+cursor equal to the first retained sequence minus one is still replayable.
+
+An invalid cursor, one older than that boundary, or one ahead of the latest
+global sequence first receives a named `replay_gap` event:
+
+```text
+event: replay_gap
+data: {"type":"replay_gap","reason":"last_event_id_too_old","last_event_id":20,"oldest_seq":100,"latest_seq":611}
+```
+
+The notice has no SSE `id`; ordinary terminal events keep their existing
+`seq`, `session_id`, and `event` payload and sequence-based ids. The other
+reasons are `invalid_last_event_id` and `last_event_id_ahead`. `last_event_id`
+is null for an invalid cursor, and `oldest_seq` is null when no events are
+retained. The bounds come from the same subscription snapshot. After the
+notice the server sends the entire retained backlog and then live events.
+Listen for `replay_gap` and reread the session list and screens to recover the
+current state; the retained events cannot reconstruct the missing history.
+
+A session's exit is announced by at most one `process_exited` event. Its
+`exit_code` is null when the code could not be collected in time; a later
+status query reports the code, and no second event corrects the first. On
+Windows, a session that exits on its own and is closed without having been
+queried in between produces no `process_exited` event.
 
 The OpenAPI document is committed and drift-tested against the code:
 

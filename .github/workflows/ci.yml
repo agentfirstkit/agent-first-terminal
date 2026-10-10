@@ -66,11 +66,11 @@ jobs:
   # does. That is how a Windows-only break in the release smoke first appeared
   # with the crate one step from publication.
   #
-  # What runs here is what Windows can answer for. The PTY, window and delivery
-  # smokes are Unix-only — they select over pipes, write a `#!/bin/sh` browser
-  # stub, and open the session on `/bin/sh` — so this leg builds the feature the
-  # release ships, runs the unit suites, and checks the binary states its own
-  # version, help and reference through the protocol.
+  # What runs here is what Windows can answer for: this leg builds the feature
+  # the release ships, runs the unit suites, checks the binary states its own
+  # version and help through the protocol, and drives the API, window and
+  # delivery smokes against the real binary. The shutdown-signal and
+  # real-browser smokes stay on the Linux gate.
   windows:
     runs-on: windows-2025
 
@@ -90,10 +90,10 @@ jobs:
           key: ${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Build the feature the release ships
-        run: cargo build --release --features api --bin afterminal
+        run: cargo build --release --bin afterminal
 
       - name: Unit suites
-        run: cargo test --features api --lib --bins
+        run: cargo test --lib --bins
 
       # The same three streams the release smoke validates on Windows, checked
       # here so a break in them fails a push instead of a tagged release.

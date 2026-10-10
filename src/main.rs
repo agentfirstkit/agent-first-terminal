@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use agent_first_data::skill::{
     self, SkillAction, SkillAgentSelection, SkillOptions, SkillScope, SkillSpec,
@@ -85,76 +85,80 @@ fn access_token(invocation: &ResolvedInvocation) -> Result<Option<String>, Strin
 }
 
 fn cli_spec() -> Result<BuiltCliSpec, CliSpecError> {
-    build_afdata_cli(
-        CliSpec::new("afterminal", env!("CARGO_PKG_VERSION"))
-            .about("Run and expose the Agent-First Terminal PTY runtime.")
-            .display_name("Agent-First Terminal")
-            .lifecycle_output(finite_output())
-            .command(CommandSpec::root())
-            .command(
-                CommandSpec::new(["api"])
-                    .about("Serve or export the OpenAPI 3.2 terminal runtime contract."),
-            )
-            .command(
-                CommandSpec::new(["api", "serve"])
-                    .about("Serve the bearer-protected terminal API.")
-                    .arg(
-                        ArgSpec::option_i64("--port", "PORT")
-                            .default_i64(9418)
-                            .about("TCP port; use 0 to let the operating system choose"),
-                    )
-                    .arg(
-                        ArgSpec::option_enum("--mode", ["local", "lan"])
-                            .value_name("MODE")
-                            .default("local")
-                            .about(
-                                "Network exposure: local binds 127.0.0.1; lan binds 0.0.0.0 and publishes the LAN address",
-                            ),
-                    )
-                    .arg(access_token_arg())
-                    .combination(
-                        Combination::new("api-serve")
-                            .action("api_serve")
-                            .optional(["port", "mode", "access_token_secret"])
-                            .output(stream_output()),
-                    ),
-            )
-            .command(
-                CommandSpec::new(["api", "export"])
-                    .about("Write the generated OpenAPI document.")
-                    .arg(
-                        ArgSpec::option("--directory", "PATH")
-                            .default("openapi")
-                            .about("Destination directory"),
-                    )
-                    .arg(ArgSpec::flag("--force").about("Replace an existing generated document"))
-                    .combination(
-                        Combination::new("api-export")
-                            .action("api_export")
-                            .optional(["directory", "force"])
-                            .output(finite_output()),
-                    ),
-            )
-            .command(ui_command())
-            .command(CommandSpec::new(["skill"]).about(
-                "Manage the Agent-First Terminal skill for Codex, Claude Code, opencode, and Hermes.",
-            ))
-            .command(skill_command(
-                "status",
-                "Show whether the Agent-First Terminal skill is installed, valid, and up to date.",
-                false,
-            ))
-            .command(skill_command(
-                "install",
-                "Install the Agent-First Terminal skill.",
-                true,
-            ))
-            .command(skill_command(
-                "uninstall",
-                "Remove an afterminal-managed Agent-First Terminal skill.",
-                true,
-            )),
-    )
+    let mut spec = CliSpec::new("afterminal", env!("CARGO_PKG_VERSION"))
+        .about("Run and expose the Agent-First Terminal PTY runtime.")
+        .display_name(env!("DISPLAY_NAME"))
+        .lifecycle_output(finite_output())
+        .command(CommandSpec::root())
+        .command(
+            CommandSpec::new(["api"])
+                .about("Serve or export the OpenAPI 3.2 terminal runtime contract."),
+        )
+        .command(
+            CommandSpec::new(["api", "serve"])
+                .about("Serve the bearer-protected terminal API.")
+                .arg(
+                    ArgSpec::option_i64("--port", "PORT")
+                        .default_i64(9418)
+                        .about("TCP port; use 0 to let the operating system choose"),
+                )
+                .arg(
+                    ArgSpec::option_enum("--mode", ["local", "lan"])
+                        .value_name("MODE")
+                        .default("local")
+                        .about(
+                            "Network exposure: local binds 127.0.0.1; lan binds 0.0.0.0 and publishes the LAN address",
+                        ),
+                )
+                .arg(access_token_arg())
+                .combination(
+                    Combination::new("api-serve")
+                        .action("api_serve")
+                        .optional(["port", "mode", "access_token_secret"])
+                        .output(stream_output()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["api", "export"])
+                .about("Write the generated OpenAPI document.")
+                .arg(
+                    ArgSpec::option("--directory", "PATH")
+                        .default("openapi")
+                        .about("Destination directory"),
+                )
+                .arg(ArgSpec::flag("--force").about("Replace an existing generated document"))
+                .combination(
+                    Combination::new("api-export")
+                        .action("api_export")
+                        .optional(["directory", "force"])
+                        .output(finite_output()),
+                ),
+        )
+        .command(ui_command())
+        .command(CommandSpec::new(["skill"]).about(
+            "Manage the Agent-First Terminal skill for Codex, Claude Code, opencode, and Hermes.",
+        ))
+        .command(skill_command(
+            "status",
+            "Show whether the Agent-First Terminal skill is installed, valid, and up to date.",
+            false,
+        ))
+        .command(skill_command(
+            "install",
+            "Install the Agent-First Terminal skill.",
+            true,
+        ))
+        .command(skill_command(
+            "uninstall",
+            "Remove an afterminal-managed Agent-First Terminal skill.",
+            true,
+        ));
+    // Absent from a source tarball with no reachable .git, and the version
+    // payload omits it rather than reporting the literal "unknown".
+    if let Some(build) = Some(env!("GIT_SHA")).filter(|sha| *sha != "unknown") {
+        spec = spec.build_id(build);
+    }
+    build_afdata_cli(spec)
 }
 
 /// `ui` in three shapes.
@@ -798,6 +802,9 @@ fn run_server(
         }
     };
     let outcome = runtime.block_on(async {
+        // Before anything is opened or announced, so no signal from here on
+        // can take the default disposition.
+        let mut shutdown = register_shutdown_signals()?;
         let network = match &mode {
             ServerMode::Api { network } => *network,
             // A window is served to this machine's own browser, so the runtime
@@ -832,14 +839,14 @@ fn run_server(
                 let state = ApiState::new(token);
                 // The same URL this API just advertised: it is the name it will
                 // answer UI requests under, and AFUI refuses any other.
-                let app = api::router(state, Arc::clone(&terminal_ui), &api_url)
+                let app = api::router(state.clone(), Arc::clone(&terminal_ui), &api_url)
                     .map_err(|error| ServeError::Runtime(format!("mount terminal UI: {error}")))?;
-                axum::serve(listener, app)
-                    .with_graceful_shutdown(shutdown_signal())
-                    .await
-                    .map_err(|error| {
-                        ServeError::Runtime(format!("serve afterminal API: {error}"))
-                    })?;
+                serve_until_stopped(listener, app, state, async move {
+                    shutdown.received().await;
+                    Ok(())
+                })
+                .await
+                .map_err(|error| ServeError::Runtime(format!("serve afterminal API: {error}")))?;
                 Ok((api_url, false, None))
             }
             ServerMode::Ui {
@@ -883,10 +890,12 @@ fn run_server(
                 let (stop_api, api_stopped) = tokio::sync::oneshot::channel::<()>();
                 let app = api::router(state.clone(), Arc::clone(&terminal_ui), &api_url)
                     .map_err(|error| ServeError::Runtime(format!("mount terminal UI: {error}")))?;
-                let api = axum::serve(listener, app).with_graceful_shutdown(async move {
+                let stopping_state = state.clone();
+                let api = serve_until_stopped(listener, app, stopping_state, async move {
                     let _stopped = api_stopped.await;
+                    Ok(())
                 });
-                let api_task = tokio::spawn(async move { api.await });
+                let api_task = tokio::spawn(api);
 
                 let session = UiSession::<()>::new(api::UI_PROVIDER_ID, api::UI_KIND)
                     .map_err(|error| ServeError::Runtime(error.to_string()))?
@@ -896,10 +905,6 @@ fn run_server(
                 // Ctrl-C ends the session the same way closing the window does,
                 // so the one waiter below covers both.
                 let interrupted = session.completion();
-                tokio::spawn(async move {
-                    shutdown_signal().await;
-                    interrupted.complete(()).await;
-                });
                 let (session, ui_runtime) = api::attach_ui_runtime(session)
                     .map_err(|error| ServeError::Runtime(error.to_string()))?;
                 api::publish_ui_state(&state, &ui_runtime)
@@ -945,10 +950,19 @@ fn run_server(
                         .build(),
                     )
                     .map_err(|_| ServeError::Output)?;
-                let outcome = active
-                    .wait()
-                    .await
-                    .map_err(|error| ServeError::Runtime(error.to_string()))?;
+                let waiting = active.wait();
+                tokio::pin!(waiting);
+                let outcome = tokio::select! {
+                    outcome = &mut waiting => outcome
+                        .map_err(|error| ServeError::Runtime(error.to_string()))?,
+                    // Also the ending for a signal that arrived while the
+                    // window was still starting: it was kept, and is read here
+                    // the moment the session is waited on.
+                    () = shutdown.received() => {
+                        interrupted.complete(()).await;
+                        waiting.await.map_err(|error| ServeError::Runtime(error.to_string()))?
+                    }
+                };
                 let _runtime_stopped = ui_runtime_task.await;
                 let _stopping = stop_api.send(());
                 match api_task.await {
@@ -1019,6 +1033,9 @@ fn run_attach_ui(
     // workspace decides which frontend is in force. Resolving one locally would
     // read a directory nobody is serving from.
     let outcome = runtime.block_on(async {
+        // Before the attachment exists, so a signal during startup still ends
+        // in the revocation below rather than in the default disposition.
+        let mut shutdown = register_shutdown_signals()?;
         let attachment =
             api::create_remote_ui_attachment(api_url, &api_access_token_secret, initial_session_id)
                 .await
@@ -1079,7 +1096,7 @@ fn run_attach_ui(
                 outcome = &mut delivery => outcome
                     .map_err(|error| ServeError::Runtime(error.to_string()))?
                     .ending(),
-                () = shutdown_signal() => "stopped",
+                () = shutdown.received() => "stopped",
                 maintained = &mut keep_alive => match maintained {
                     Err(error) => return Err(ServeError::Runtime(error.to_string())),
                     Ok(()) => return Err(ServeError::Runtime(
@@ -1157,8 +1174,90 @@ enum ServeError {
     Output,
 }
 
-async fn shutdown_signal() {
-    let _result = tokio::signal::ctrl_c().await;
+/// The signals that end a serving command, registered apart from waiting.
+///
+/// Registration is what replaces the default disposition, so it has to happen
+/// before a command says it is ready: a supervisor that reads the ready event
+/// and signals at once would otherwise kill the process outright, with no
+/// terminal result and nothing cleaned up. A signal that arrives between
+/// [`Self::register`] and [`Self::received`] — while a window is still being
+/// started, say — is kept, and `received` returns it immediately.
+struct ShutdownSignals {
+    #[cfg(unix)]
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    hangup: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    interrupt: tokio::signal::windows::CtrlC,
+}
+
+impl ShutdownSignals {
+    /// Must run inside the runtime that will later await [`Self::received`].
+    fn register() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Ok(Self {
+                interrupt: signal(SignalKind::interrupt())?,
+                terminate: signal(SignalKind::terminate())?,
+                hangup: signal(SignalKind::hangup())?,
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                interrupt: tokio::signal::windows::ctrl_c()?,
+            })
+        }
+    }
+
+    async fn received(&mut self) {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = self.interrupt.recv() => {},
+            _ = self.terminate.recv() => {},
+            _ = self.hangup.recv() => {},
+        }
+        #[cfg(windows)]
+        {
+            let _received = self.interrupt.recv().await;
+        }
+    }
+}
+
+fn register_shutdown_signals() -> Result<ShutdownSignals, ServeError> {
+    ShutdownSignals::register()
+        .map_err(|error| ServeError::Runtime(format!("register shutdown signals: {error}")))
+}
+
+async fn serve_until_stopped(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    state: ApiState,
+    stopped: impl std::future::Future<Output = std::io::Result<()>>,
+) -> std::io::Result<()> {
+    let (stop, stop_requested) = tokio::sync::oneshot::channel();
+    let serving = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _stopped = stop_requested.await;
+        })
+        .into_future();
+    tokio::pin!(serving);
+    tokio::select! {
+        result = &mut serving => return result,
+        result = stopped => result?
+    }
+    state.stop_event_streams();
+    let _stopping = stop.send(());
+    // A peer can also stop reading bytes already buffered by HTTP. Give the
+    // response a short drain, then return so this command's owned runtime
+    // drops the remaining connections and terminal state.
+    match tokio::time::timeout(Duration::from_secs(2), &mut serving).await {
+        Ok(result) => result,
+        Err(_) => Ok(()),
+    }
 }
 
 fn finish_error(
@@ -1213,6 +1312,65 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Registration alone must take the signal over. Each signal is sent
+    /// before anything waits for it — the position of a supervisor signalling
+    /// the instant it reads a ready event, or of Ctrl-C while a window is
+    /// still starting — and must be reported by the wait that follows. Were
+    /// registration deferred to that wait, the default disposition would end
+    /// this test process instead.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn a_shutdown_signal_sent_before_the_wait_is_kept_for_it() {
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            let mut shutdown = ShutdownSignals::register().expect("register shutdown signals");
+            // SAFETY: signals this process, whose handler was installed above.
+            assert_eq!(unsafe { libc::kill(libc::getpid(), signal) }, 0);
+            tokio::time::timeout(Duration::from_secs(5), shutdown.received())
+                .await
+                .unwrap_or_else(|_| panic!("signal {signal} was not reported"));
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn server_command_shutdown_releases_an_open_event_response() {
+        let token = "test-token-0123456789-abcdefghijkl";
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("loopback listener");
+        let address = listener.local_addr().expect("loopback address");
+        let url = format!("http://{address}");
+        let state = ApiState::new(token.to_owned());
+        let ui = api::TerminalUi::resolve(Path::new("/nonexistent"))
+            .expect("built-in terminal frontend");
+        let app = api::router(state.clone(), Arc::new(ui), &url).expect("API router");
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let served = tokio::spawn(serve_until_stopped(listener, app, state, async move {
+            let _stopped = stopped.await;
+            Ok(())
+        }));
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            reqwest::Client::new()
+                .get(format!("{url}/v1/events"))
+                .header("last-event-id", "1")
+                .bearer_auth(token)
+                .send(),
+        )
+        .await
+        .expect("SSE response headers arrive")
+        .expect("SSE request succeeds");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        stop.send(()).expect("request command shutdown");
+        tokio::time::timeout(Duration::from_secs(3), served)
+            .await
+            .expect("the command stops while the event client stays connected")
+            .expect("server task completes")
+            .expect("server shutdown succeeds");
+        drop(response);
+    }
 
     fn spec() -> BuiltCliSpec {
         match cli_spec() {

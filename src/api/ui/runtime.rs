@@ -1,13 +1,13 @@
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
-use agent_first_ui::{UiCallError, UiSessionRuntime};
+use agent_first_ui::{UiCall, UiCallError, UiSessionRuntime};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use super::super::model::{ScreenResult, SessionInfo, SignalName};
 use super::super::server::{ApiState, validate_session_id};
-use crate::{InputActor, InputActorKind, TerminalError};
+use crate::{InputActor, InputActorKind, PreparedInput, TerminalError};
 
 const MAX_UI_INPUT_BYTES: usize = 1024 * 1024;
 const UI_ACTOR_ID: &str = "local-ui";
@@ -115,7 +115,7 @@ pub(super) fn publish_opening_state(
 }
 
 pub(super) async fn run(state: ApiState, runtime: TerminalRuntime) {
-    let subscription = state
+    let mut subscription = state
         .manager
         .lock()
         .ok()
@@ -124,6 +124,7 @@ pub(super) async fn run(state: ApiState, runtime: TerminalRuntime) {
     events.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut reconciliation = tokio::time::interval(Duration::from_secs(1));
     reconciliation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut inputs = tokio::task::JoinSet::new();
     // The opening state was published before the credential became visible.
     events.tick().await;
     reconciliation.tick().await;
@@ -135,12 +136,15 @@ pub(super) async fn run(state: ApiState, runtime: TerminalRuntime) {
                     Ok(Some(call)) => call,
                     Ok(None) | Err(_) => return,
                 };
-                let outcome = execute_action(&state, call.action());
-                match outcome {
-                    Ok(reply) => {
-                        if publish_state(&state, &runtime).is_err()
-                            || call.finish(&reply).await.is_err()
-                        {
+                match prepare_action(&state, call.action()) {
+                    Ok(input @ PreparedUiAction::Input { .. }) => {
+                        // Keep receiving calls and publishing terminal changes
+                        // while a PTY is blocked. Completion is a separate
+                        // select branch, not an await in this one.
+                        inputs.spawn_blocking(move || (call, input.execute()));
+                    }
+                    Ok(PreparedUiAction::Ready(reply)) => {
+                        if complete_action(&state, &runtime, call, Ok(reply)).await.is_err() {
                             return;
                         }
                     }
@@ -151,18 +155,41 @@ pub(super) async fn run(state: ApiState, runtime: TerminalRuntime) {
                     }
                 }
             }
+            completed = inputs.join_next(), if !inputs.is_empty() => {
+                let Some(Ok((call, outcome))) = completed else {
+                    return;
+                };
+                if complete_action(&state, &runtime, call, outcome).await.is_err() {
+                    return;
+                }
+            }
             _ = events.tick() => {
-                let changed = subscription.as_ref().is_some_and(|subscription| {
-                    let mut changed = false;
+                let mut changed = false;
+                let mut disconnected = false;
+                if let Some(subscription) = &subscription {
                     loop {
                         match subscription.receiver.try_recv() {
                             Ok(_event) => changed = true,
-                            Err(TryRecvError::Empty) => return changed,
-                            Err(TryRecvError::Disconnected) => return changed,
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => {
+                                disconnected = true;
+                                break;
+                            }
                         }
                     }
-                });
-                if changed && publish_state(&state, &runtime).is_err() {
+                }
+                if disconnected {
+                    // A slow subscriber is removed when its bounded queue
+                    // fills. Start a fresh subscription, then publish current
+                    // state so neither the dropped events nor the handoff gap
+                    // leaves the page on an older terminal screen.
+                    subscription = state
+                        .manager
+                        .lock()
+                        .ok()
+                        .map(|manager| manager.subscribe_events());
+                }
+                if (changed || disconnected) && publish_state(&state, &runtime).is_err() {
                     return;
                 }
             }
@@ -175,6 +202,21 @@ pub(super) async fn run(state: ApiState, runtime: TerminalRuntime) {
                 }
             }
         }
+    }
+}
+
+async fn complete_action(
+    state: &ApiState,
+    runtime: &TerminalRuntime,
+    call: UiCall<TerminalUiAction, TerminalUiReply>,
+    outcome: Result<TerminalUiReply, UiCallError>,
+) -> agent_first_ui::Result<()> {
+    match outcome {
+        Ok(reply) => {
+            publish_state(state, runtime)?;
+            call.finish(&reply).await
+        }
+        Err(failure) => call.fail(failure).await,
     }
 }
 
@@ -215,10 +257,32 @@ fn terminal_state(state: &ApiState) -> TerminalUiState {
     TerminalUiState::Snapshot { sessions }
 }
 
-fn execute_action(
+enum PreparedUiAction {
+    Ready(TerminalUiReply),
+    Input {
+        input: PreparedInput,
+        bytes: Vec<u8>,
+    },
+}
+
+impl PreparedUiAction {
+    fn execute(self) -> Result<TerminalUiReply, UiCallError> {
+        match self {
+            Self::Ready(reply) => Ok(reply),
+            Self::Input { input, bytes } => {
+                input.write(&bytes).map_err(terminal_call_error)?;
+                Ok(TerminalUiReply::InputAccepted {
+                    input_bytes: bytes.len(),
+                })
+            }
+        }
+    }
+}
+
+fn prepare_action(
     state: &ApiState,
     action: &TerminalUiAction,
-) -> Result<TerminalUiReply, UiCallError> {
+) -> Result<PreparedUiAction, UiCallError> {
     validate_session_id(action.session_id())
         .map_err(|message| UiCallError::new("invalid_session_id", message))?;
     let mut manager = state.manager.lock().map_err(|_| {
@@ -246,11 +310,12 @@ fn execute_action(
                     format!("decoded input exceeds {MAX_UI_INPUT_BYTES} bytes"),
                 ));
             }
-            manager
-                .write_as(session_id, ui_actor(), None, &bytes)
+            let prepared = manager
+                .prepare_write_as(session_id, ui_actor(), None)
                 .map_err(terminal_call_error)?;
-            Ok(TerminalUiReply::InputAccepted {
-                input_bytes: bytes.len(),
+            Ok(PreparedUiAction::Input {
+                input: prepared,
+                bytes,
             })
         }
         TerminalUiAction::InputAction {
@@ -262,11 +327,12 @@ fn execute_action(
                 .screen(session_id)
                 .ok_or_else(|| terminal_call_error(TerminalError::NotFound(session_id.clone())))?;
             let bytes = input_action_bytes(*action, *ctrl, screen.modes.application_cursor);
-            manager
-                .write_as(session_id, ui_actor(), None, bytes)
+            let prepared = manager
+                .prepare_write_as(session_id, ui_actor(), None)
                 .map_err(terminal_call_error)?;
-            Ok(TerminalUiReply::InputAccepted {
-                input_bytes: bytes.len(),
+            Ok(PreparedUiAction::Input {
+                input: prepared,
+                bytes: bytes.to_vec(),
             })
         }
         TerminalUiAction::SecretInput { session_id, action } => {
@@ -277,9 +343,11 @@ fn execute_action(
                 TerminalUiSecretInputAction::End => manager.exit_secret(session_id, ui_actor()),
             }
             .map_err(terminal_call_error)?;
-            Ok(TerminalUiReply::SecretInputChanged {
-                active: status.active,
-            })
+            Ok(PreparedUiAction::Ready(
+                TerminalUiReply::SecretInputChanged {
+                    active: status.active,
+                },
+            ))
         }
         TerminalUiAction::Resize {
             session_id,
@@ -289,22 +357,32 @@ fn execute_action(
             manager
                 .resize(session_id, *rows, *cols)
                 .map_err(terminal_call_error)?;
-            Ok(TerminalUiReply::Resized {
+            Ok(PreparedUiAction::Ready(TerminalUiReply::Resized {
                 rows: *rows,
                 cols: *cols,
-            })
+            }))
         }
         TerminalUiAction::Signal { session_id, signal } => {
             manager
                 .signal_as(session_id, ui_actor(), None, (*signal).into())
                 .map_err(terminal_call_error)?;
-            Ok(TerminalUiReply::SignalSent { signal: *signal })
+            Ok(PreparedUiAction::Ready(TerminalUiReply::SignalSent {
+                signal: *signal,
+            }))
         }
         TerminalUiAction::Close { session_id } => {
             manager.close(session_id).map_err(terminal_call_error)?;
-            Ok(TerminalUiReply::Closed)
+            Ok(PreparedUiAction::Ready(TerminalUiReply::Closed))
         }
     }
+}
+
+#[cfg(test)]
+fn execute_action(
+    state: &ApiState,
+    action: &TerminalUiAction,
+) -> Result<TerminalUiReply, UiCallError> {
+    prepare_action(state, action)?.execute()
 }
 
 fn input_action_bytes(
@@ -342,6 +420,11 @@ fn terminal_call_error(error: TerminalError) -> UiCallError {
         TerminalError::InputLeaseRequired { .. } => ("input_lease_required", false, None),
         TerminalError::InputLeaseNotFound { .. } => ("input_lease_not_found", false, None),
         TerminalError::InputLeaseConflict { .. } => ("input_lease_conflict", true, None),
+        TerminalError::InputInProgress { .. } => (
+            "input_in_progress",
+            true,
+            Some("retry after the current terminal input chunk finishes writing"),
+        ),
         TerminalError::SecretInputActive { .. } => (
             "secret_input_active",
             true,
@@ -455,49 +538,209 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn a_blocked_ui_input_keeps_events_and_other_session_calls_running() {
+        use std::io::{self, Write};
+        use std::sync::{Arc, Mutex, mpsc};
+        use std::time::Duration;
+
+        use agent_first_ui::test_support::RuntimeClient;
+        use agent_first_ui::{UiExpiry, UiSession, UiUrlDelivery};
+        use serde_json::{Value, json};
+
+        struct BlockedWriter {
+            entered: Arc<tokio::sync::Notify>,
+            release: mpsc::Receiver<()>,
+        }
+
+        impl Write for BlockedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.entered.notify_one();
+                self.release
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::TimedOut, "test UI input was not released")
+                    })?;
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for action in [
+            json!({
+                "type": "input",
+                "session_id": "ui_blocked",
+                "data_base64": base64::engine::general_purpose::STANDARD.encode(vec![b'x'; 65_536]),
+            }),
+            json!({
+                "type": "input_action",
+                "session_id": "ui_blocked",
+                "action": "return",
+                "ctrl": false,
+            }),
+        ] {
+            let state = ApiState::new("test-token".to_string());
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let (release, receiver) = mpsc::channel();
+            {
+                let mut manager = state.manager.lock().expect("manager lock");
+                for id in ["ui_blocked", "ui_available"] {
+                    manager
+                        .open(id.to_string(), crate::test_shell::spec())
+                        .expect("PTY session");
+                }
+                manager
+                    .sessions
+                    .get_mut("ui_blocked")
+                    .expect("session")
+                    .writer = Arc::new(Mutex::new(Box::new(BlockedWriter {
+                    entered: Arc::clone(&entered),
+                    release: receiver,
+                })));
+            }
+            let (session, runtime) = UiSession::<()>::new("console", "terminal")
+                .expect("UI session")
+                .with_runtime::<super::TerminalUiAction, super::TerminalUiReply, super::TerminalUiState>()
+                .expect("typed runtime");
+            super::publish_opening_state(&state, &runtime).expect("opening state");
+            let running = tokio::spawn(super::run(state.clone(), runtime));
+            let active = session
+                .serve(axum::Router::new(), UiUrlDelivery::new(UiExpiry::Never))
+                .await
+                .expect("serve runtime");
+            let mut writer = RuntimeClient::connect(active.access_url(), "input-client")
+                .await
+                .expect("writer client");
+            writer.opening_state::<Value>().await.expect("writer state");
+            let mut controller = RuntimeClient::connect(active.access_url(), "control-client")
+                .await
+                .expect("control client");
+            controller
+                .opening_state::<Value>()
+                .await
+                .expect("control state");
+            let input = tokio::spawn(async move { writer.call::<_, Value>(&action).await });
+            tokio::time::timeout(Duration::from_secs(2), entered.notified())
+                .await
+                .expect("UI input reaches the blocked writer");
+            assert!(!input.is_finished(), "the UI input must still be pending");
+            {
+                let manager = state.manager.lock().expect("manager lock");
+                let mut screen = manager
+                    .sessions
+                    .get("ui_available")
+                    .expect("session")
+                    .shared
+                    .lock()
+                    .expect("screen lock");
+                let _replies = screen.push_chunk(b"\r\nUI_EVENTS_CONTINUE\r\n");
+            }
+            let refreshed = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let mut observer =
+                        RuntimeClient::connect(active.access_url(), "state-observer")
+                            .await
+                            .expect("observer");
+                    let snapshot = observer
+                        .opening_state::<Value>()
+                        .await
+                        .expect("retained state");
+                    observer.close().await.expect("close observer");
+                    if snapshot
+                        .is_some_and(|snapshot| snapshot.to_string().contains("UI_EVENTS_CONTINUE"))
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(16)).await;
+                }
+            })
+            .await;
+            let closed = tokio::time::timeout(
+                Duration::from_secs(2),
+                controller.call::<_, Value>(&json!({
+                    "type": "close", "session_id": "ui_available",
+                })),
+            )
+            .await;
+            // Release before assertions so a regression still shuts down its
+            // blocking task without leaving a writer waiting indefinitely.
+            let _released = release.send(());
+            let accepted = tokio::time::timeout(Duration::from_secs(5), input)
+                .await
+                .expect("released input finishes")
+                .expect("input task");
+            refreshed.expect("terminal changes are published while UI input is blocked");
+            assert_eq!(
+                closed
+                    .expect("other session's close remains available")
+                    .expect("close reply")["type"],
+                "closed"
+            );
+            assert_eq!(accepted.expect("input reply")["type"], "input_accepted");
+            state
+                .manager
+                .lock()
+                .expect("manager lock")
+                .close("ui_blocked")
+                .expect("close blocked session");
+            controller.close().await.expect("close controller");
+            drop(active);
+            running.abort();
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn human_ui_input_preempts_an_agent_exclusive_lease() {
         use crate::{InputActor, InputActorKind, InputLeaseMode, TerminalSessionManager};
 
-        let session_id = "ui_human";
-        let mut manager = TerminalSessionManager::new();
-        manager
-            .open(session_id.to_string(), crate::test_shell::spec())
-            .expect("session opens");
-        manager
-            .acquire_lease(
-                session_id,
-                InputActor {
-                    kind: InputActorKind::Agent,
-                    id: "inspector".to_string(),
-                },
-                InputLeaseMode::Exclusive,
-                60_000,
-                None,
-            )
-            .expect("exclusive lease");
-        let state = ApiState::with_manager(manager, "test-token".to_string());
-        let reply = execute_action(
-            &state,
-            &TerminalUiAction::Input {
-                session_id: session_id.to_string(),
+        for action in [
+            TerminalUiAction::Input {
+                session_id: "ui_human".to_string(),
                 data_base64: base64::engine::general_purpose::STANDARD.encode(b"printf ok\n"),
             },
-        )
-        .expect("human input is accepted");
-        assert!(matches!(
-            reply,
-            super::TerminalUiReply::InputAccepted { .. }
-        ));
-        assert_eq!(
-            state
-                .manager
-                .lock()
-                .expect("manager")
-                .leases(session_id)
-                .expect("leases")
-                .len(),
-            0
-        );
+            TerminalUiAction::InputAction {
+                session_id: "ui_human".to_string(),
+                action: TerminalUiInputAction::Return,
+                ctrl: false,
+            },
+        ] {
+            let session_id = action.session_id();
+            let mut manager = TerminalSessionManager::new();
+            manager
+                .open(session_id.to_string(), crate::test_shell::spec())
+                .expect("session opens");
+            manager
+                .acquire_lease(
+                    session_id,
+                    InputActor {
+                        kind: InputActorKind::Agent,
+                        id: "inspector".to_string(),
+                    },
+                    InputLeaseMode::Exclusive,
+                    60_000,
+                    None,
+                )
+                .expect("exclusive lease");
+            let state = ApiState::with_manager(manager, "test-token".to_string());
+            let reply = execute_action(&state, &action).expect("human input is accepted");
+            assert!(matches!(
+                reply,
+                super::TerminalUiReply::InputAccepted { .. }
+            ));
+            assert_eq!(
+                state
+                    .manager
+                    .lock()
+                    .expect("manager")
+                    .leases(session_id)
+                    .expect("leases")
+                    .len(),
+                0
+            );
+        }
     }
 }

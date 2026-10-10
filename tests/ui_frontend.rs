@@ -35,10 +35,13 @@ for arg in "$@"; do
     --app=*) url="${arg#--app=}" ;;
   esac
 done
-printf '%s' "$url" > "$AFTERMINAL_STUB_DIR/url"
-curl -sS -o "$AFTERMINAL_STUB_DIR/body" "$url"
-curl -sS -o "$AFTERMINAL_STUB_DIR/style" "${url}style.css"
-curl -sS -o "$AFTERMINAL_STUB_DIR/base" "${url}__afui/base.css"
+# The window key travels in the fragment; relative assets resolve against the
+# URL without it, as a browser would.
+page="${url%%#*}"
+printf '%s' "$page" > "$AFTERMINAL_STUB_DIR/url"
+curl -sS -o "$AFTERMINAL_STUB_DIR/body" "$page"
+curl -sS -o "$AFTERMINAL_STUB_DIR/style" "${page}style.css"
+curl -sS -o "$AFTERMINAL_STUB_DIR/base" "${page}__afui/base.css"
 "#;
 
 /// A page nobody could mistake for afterminal's own, and one whose *structure*

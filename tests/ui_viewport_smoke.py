@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Measure how much terminal is left at phone viewports.
 
-Separate from `ui_browser_smoke.py` on purpose. That file types, composes,
-selects and toggles private input, and by the time it finished a viewport
-override no longer reached the page: landscape and landscape-with-a-keyboard
-both measured 350px, the same number, so the check was measuring nothing. On a
-page that has only just loaded the override lands and the three viewports differ
-as they should.
+Separate from `ui_browser_smoke.py` so device metrics are installed on a blank
+page before navigation, typing, or IME focus. The requested dimensions are CSS
+viewport dimensions, not Chromium window dimensions: a browser window's own
+chrome must not reduce the phone viewport this check claims to exercise.
 
 What this guards: every responsive rule on this page keys off width, and a phone
 in landscape is wider than all of them, so it was handed the desktop layout at a
@@ -40,13 +38,12 @@ from ui_browser_smoke import (  # noqa: E402
     read_events,
 )
 
-# A phone, sideways, and sideways with a keyboard over half of it. The floors are
+# A phone in portrait and landscape. The floors are
 # set well under what a correct layout gives, because this is here to catch a
 # collapse rather than to pin a number that a font change may move.
-# Two shapes, each in its own browser because the size can only be set at
-# launch. A third case for a keyboard covering half the screen is missing on
-# purpose: headless clamps a window's height at around 375px, so it measured the
-# same as landscape, and a case that cannot come out differently is not a case.
+# Each shape starts on a blank page, sets device metrics, then navigates. The
+# check verifies the actual viewport before measuring terminal room, so a
+# browser that ignores emulation cannot silently exercise a different size.
 VIEWPORTS = (
     ("portrait", 390, 844, 25),
     ("landscape", 844, 390, 14),
@@ -111,13 +108,24 @@ def main() -> int:
             measured = []
             for label, width, height, least in VIEWPORTS:
                 chromium = Chromium(
-                    window_url,
+                    "about:blank",
                     os.path.join(profile, f"{width}x{height}"),
                     browser,
                     window_size=(width, height),
                 )
                 page = chromium.attach_to_page()
                 chromium.call("Runtime.enable", session=page)
+                chromium.call(
+                    "Emulation.setDeviceMetricsOverride",
+                    {"width": width, "height": height, "deviceScaleFactor": 1,
+                     "mobile": False, "screenWidth": width, "screenHeight": height,
+                     "screenOrientation": {
+                         "type": "landscapePrimary" if width > height else "portraitPrimary",
+                         "angle": 90 if width > height else 0,
+                     }},
+                    session=page,
+                )
+                chromium.call("Page.navigate", {"url": window_url}, session=page)
                 deadline = time.monotonic() + 40
                 while time.monotonic() < deadline:
                     drawn = chromium.call(
@@ -142,18 +150,40 @@ def main() -> int:
                     time.sleep(0.5)
                     shape = json.loads(chromium.call(
                         "Runtime.evaluate",
-                        # `#terminal` grows with its content, so measuring it
-                        # counts rows of output rather than room for them. The
-                        # panel is the space the layout actually leaves.
+                        # The stage is the space left after the heading and
+                        # key bar; remove the terminal's inner padding too.
+                        # Counting the whole panel includes chrome as rows.
                         {"expression": "(() => {"
                                        " const panel = document.querySelector('.terminal-panel');"
                                        " const row = document.querySelector('.terminal-row');"
                                        " const rowHeight = row ?"
                                        " row.getBoundingClientRect().height : 0;"
-                                       " const height = panel.getBoundingClientRect().height;"
+                                       " const stage = document.querySelector('.terminal-stage');"
+                                       " const terminal = getComputedStyle(document.querySelector('#terminal'));"
+                                       " const height = stage.getBoundingClientRect().height -"
+                                       "   parseFloat(terminal.paddingTop) - parseFloat(terminal.paddingBottom);"
+                                       " const workspace = document.querySelector('.workspace');"
+                                       " const padding = getComputedStyle(workspace);"
+                                       " const bandHeight = selector => {"
+                                       "   const node = document.querySelector(selector);"
+                                       "   return node ? Math.round(node.getBoundingClientRect().height) : 0;"
+                                       " };"
                                        " return JSON.stringify({rows: rowHeight ?"
                                        " Math.floor(height / rowHeight) : 0,"
-                                       " height: Math.round(height)}); })()",
+                                       " height: Math.round(height),"
+                                       " panel_height: Math.round(panel.getBoundingClientRect().height),"
+                                       " row_height: Math.round(rowHeight * 100) / 100,"
+                                       " viewport_width: window.innerWidth,"
+                                       " viewport_height: window.innerHeight,"
+                                       " visual_viewport_height: window.visualViewport ?"
+                                       "   Math.round(window.visualViewport.height) : null,"
+                                       " workspace_height: bandHeight('.workspace'),"
+                                       " workspace_padding: parseFloat(padding.paddingTop) +"
+                                       "   parseFloat(padding.paddingBottom),"
+                                       " topbar_height: bandHeight('.topbar'),"
+                                       " heading_height: bandHeight('.terminal-heading'),"
+                                       " key_bar_height: bandHeight('.key-bar'),"
+                                       " terminal_stage_height: bandHeight('.terminal-stage')}); })()",
                          "returnByValue": True},
                         session=page,
                     )["result"]["value"])
@@ -162,11 +192,20 @@ def main() -> int:
                     previous = shape
 
                 measured.append(f"{label} {shape['rows']} rows in {shape['height']}px")
+                if (shape["viewport_width"] != width
+                        or shape["viewport_height"] != height
+                        or shape["visual_viewport_height"] != height):
+                    raise RuntimeError(
+                        f"{label}: requested a {width}x{height} CSS viewport but "
+                        f"Chromium applied a different size: "
+                        f"{json.dumps(shape, sort_keys=True)}"
+                    )
                 if shape["rows"] < least:
                     raise RuntimeError(
                         f"{label} left {shape['rows']} rows of terminal in "
                         f"{shape['height']}px, fewer than the {least} this size should "
-                        f"hold: the chrome is taking height the terminal needs"
+                        f"hold: the chrome is taking height the terminal needs; "
+                        f"layout={json.dumps(shape, sort_keys=True)}"
                     )
                 chromium.close()
                 chromium = None

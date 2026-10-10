@@ -191,7 +191,7 @@ pub fn openapi_document() -> Value {
                     "name": "Last-Event-ID",
                     "in": "header",
                     "required": false,
-                    "description": "Resume after this global event sequence when it remains in the bounded backlog",
+                    "description": "Resume after this global event sequence when it remains in the bounded backlog. An invalid, too-old, or future cursor emits replay_gap before the retained backlog.",
                     "schema": {
                         "type": "string",
                         "pattern": "^[0-9]+$"
@@ -405,7 +405,7 @@ fn paths() -> Value {
             "get": {
                 "operationId": "streamEvents",
                 "summary": "Watch the multiplexed event stream for every session",
-                "description": "Each SSE id is the globally monotonic event sequence. Event payloads identify their session and never contain raw terminal bytes.",
+                "description": "Each terminal event's SSE id is its globally monotonic sequence. Event payloads identify their session and never contain raw terminal bytes. An invalid Last-Event-ID, one older than oldest_seq minus one, or one greater than latest_seq first emits a named replay_gap event without an id, then the retained backlog and live events. replay_gap carries subscription bounds; reread the session list and screens to recover current state. With no Last-Event-ID, the retained backlog is sent without a gap notice.",
                 "tags": ["events"],
                 "parameters": [{"$ref": "#/components/parameters/LastEventId"}],
                 "responses": {
@@ -413,7 +413,12 @@ fn paths() -> Value {
                         "description": "A server-sent event stream",
                         "content": {
                             "text/event-stream": {
-                                "itemSchema": {"$ref": "#/components/schemas/EventEnvelope"}
+                                "itemSchema": {
+                                    "oneOf": [
+                                        {"$ref": "#/components/schemas/EventEnvelope"},
+                                        {"$ref": "#/components/schemas/ReplayGap"}
+                                    ]
+                                }
                             }
                         }
                     },
@@ -1045,6 +1050,38 @@ fn event_schemas() -> Value {
             "required": ["seq", "session_id", "event"],
             "additionalProperties": false
         },
+        "ReplayGap": {
+            "type": "object",
+            "description": "Data for the named replay_gap SSE event. This notice has no SSE id and does not advance the global terminal event sequence.",
+            "properties": {
+                "type": {"const": "replay_gap"},
+                "reason": {
+                    "type": "string",
+                    "enum": [
+                        "invalid_last_event_id",
+                        "last_event_id_too_old",
+                        "last_event_id_ahead"
+                    ]
+                },
+                "last_event_id": {
+                    "type": ["integer", "null"],
+                    "minimum": 0,
+                    "description": "The supplied cursor, or null when it is not a valid unsigned decimal sequence"
+                },
+                "oldest_seq": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "description": "First retained terminal event sequence, or null when the backlog is empty"
+                },
+                "latest_seq": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Latest global terminal event sequence at the same instant as the retained backlog snapshot"
+                }
+            },
+            "required": ["type", "reason", "last_event_id", "oldest_seq", "latest_seq"],
+            "additionalProperties": false
+        },
         "TerminalEvent": {
             "oneOf": [
                 {
@@ -1358,8 +1395,19 @@ mod tests {
         let document = openapi_document();
         assert_eq!(
             document["paths"]["/v1/events"]["get"]["responses"]["200"]["content"]["text/event-stream"]
-                ["itemSchema"]["$ref"],
-            "#/components/schemas/EventEnvelope"
+                ["itemSchema"]["oneOf"],
+            json!([
+                {"$ref": "#/components/schemas/EventEnvelope"},
+                {"$ref": "#/components/schemas/ReplayGap"}
+            ])
+        );
+        assert_eq!(
+            document["components"]["schemas"]["ReplayGap"]["properties"]["reason"]["enum"],
+            json!([
+                "invalid_last_event_id",
+                "last_event_id_too_old",
+                "last_event_id_ahead"
+            ])
         );
         assert_eq!(
             document["components"]["securitySchemes"]["bearerAuth"]["scheme"],

@@ -27,7 +27,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -123,6 +124,8 @@ pub enum TerminalError {
         session_id: TerminalSessionId,
         quiet_for_ms: u64,
     },
+    /// A secret input boundary cannot move across an unfinished input write.
+    InputInProgress { session_id: TerminalSessionId },
     /// The supplied secret-input reason is not usable.
     InvalidSecretInputReason(String),
     /// The requested lease does not exist or has expired.
@@ -204,6 +207,10 @@ impl fmt::Display for TerminalError {
                 f,
                 "terminal session `{session_id}` is still producing output ({quiet_for_ms}ms quiet of {SECRET_INPUT_SETTLE_MS}ms); secret input mode cannot end yet"
             ),
+            TerminalError::InputInProgress { session_id } => write!(
+                f,
+                "terminal session `{session_id}` is still writing input; retry changing secret input mode after it completes"
+            ),
             TerminalError::InvalidSecretInputReason(message) => {
                 write!(f, "invalid secret input reason: {message}")
             }
@@ -242,7 +249,6 @@ pub enum TerminalSessionStatus {
     /// Shell process exited (with an exit code when known).
     Exited(Option<i32>),
     /// The session failed (reader/spawn error); message is advisory.
-    #[allow(dead_code)]
     Error(String),
 }
 
@@ -646,7 +652,8 @@ pub struct TerminalSessionMeta {
 pub struct TerminalSubscription {
     /// Recent scrollback (raw bytes) at subscribe time, for replay.
     pub backlog: Vec<u8>,
-    /// Subsequent raw byte chunks. Dropped when this subscription is dropped.
+    /// Subsequent raw byte chunks. A full queue disconnects this subscriber;
+    /// resubscribe and read the authoritative screen after disconnection.
     pub receiver: Receiver<Vec<u8>>,
 }
 
@@ -725,6 +732,7 @@ pub struct EventEnvelope {
 /// joining slightly late still gets recent history, small enough to keep
 /// memory flat regardless of how long sessions have been running.
 const EVENT_BACKLOG_CAPACITY: usize = 512;
+const SUBSCRIPTION_CAPACITY: usize = 128;
 
 /// The global (multiplexed) event bus. Exactly one instance lives on the
 /// `TerminalSessionManager`; every session holds a clone of the same `Arc` so
@@ -739,15 +747,14 @@ const EVENT_BACKLOG_CAPACITY: usize = 512;
 #[derive(Default)]
 struct EventBus {
     seq: u64,
-    subscribers: Vec<Sender<EventEnvelope>>,
+    subscribers: Vec<SyncSender<EventEnvelope>>,
     backlog: Vec<EventEnvelope>,
 }
 
 impl EventBus {
     /// Bump the global seq, build the envelope, retain it in the bounded
     /// backlog, and fan out to subscribers — dropping any whose receiver has
-    /// gone away (same `retain(|tx| tx.send(...).is_ok())` pattern as the raw
-    /// byte fan-out in `Shared::push_chunk`).
+    /// gone away or fallen behind. A slow subscriber never blocks publication.
     fn emit(&mut self, session_id: TerminalSessionId, event: TerminalEvent) {
         self.seq += 1;
         let envelope = EventEnvelope {
@@ -761,7 +768,7 @@ impl EventBus {
             self.backlog.drain(0..excess);
         }
         self.subscribers
-            .retain(|tx| tx.send(envelope.clone()).is_ok());
+            .retain(|tx| tx.try_send(envelope.clone()).is_ok());
     }
 }
 
@@ -770,9 +777,12 @@ impl EventBus {
 /// subsequent envelopes. Per-session filtering (matching on `session_id`) is
 /// the caller's job — there is no per-session subscribe in this phase.
 pub struct EventSubscription {
+    /// Latest sequence at the same instant the backlog was captured.
+    pub latest_seq: u64,
     /// Recent events (any session) at subscribe time, for replay.
     pub backlog: Vec<EventEnvelope>,
-    /// Subsequent events, all sessions, tagged by `session_id`.
+    /// Subsequent events, all sessions, tagged by `session_id`. A full queue
+    /// disconnects this subscriber; reconnect and resynchronize retained state.
     pub receiver: Receiver<EventEnvelope>,
 }
 
@@ -826,9 +836,10 @@ impl vt100::Callbacks for TerminalQueries {
 
 /// State shared between a session handle and its reader thread.
 struct Shared {
+    input_in_progress: bool,
     ring: Vec<u8>,
     ring_capacity: usize,
-    subscribers: Vec<Sender<Vec<u8>>>,
+    subscribers: Vec<SyncSender<Vec<u8>>>,
     status: TerminalSessionStatus,
     // Phase 2: VT screen model using vt100
     parser: vt100::Parser<TerminalQueries>,
@@ -849,6 +860,21 @@ struct Shared {
 }
 
 impl Shared {
+    /// Records the child's exit and announces it at most once.
+    ///
+    /// A session whose reader failed while the child lived is in `Error`, and
+    /// its exit is as new as a running session's. An exit already recorded is
+    /// only ever refined: a known code is never replaced by an unknown one.
+    fn record_exit(&mut self, code: Option<i32>) {
+        let newly_exited = !matches!(self.status, TerminalSessionStatus::Exited(_));
+        if newly_exited || code.is_some() {
+            self.status = TerminalSessionStatus::Exited(code);
+        }
+        if newly_exited && let Ok(mut bus) = self.events.lock() {
+            bus.emit(self.id.clone(), TerminalEvent::ProcessExited { code });
+        }
+    }
+
     /// Feeds one chunk of output through the terminal model, and returns
     /// anything the program on the far end is waiting to be told in reply.
     #[must_use]
@@ -880,9 +906,9 @@ impl Shared {
             let excess = self.ring.len() - self.ring_capacity;
             self.ring.drain(0..excess);
         }
-        // Drop subscribers whose receiver has gone away.
+        // Disconnect slow subscribers instead of blocking the reader.
         self.subscribers
-            .retain(|tx| tx.send(chunk.to_vec()).is_ok());
+            .retain(|tx| tx.try_send(chunk.to_vec()).is_ok());
 
         // Phase 3: emit tagged events on the global bus. The caller already
         // holds this session's `Shared` lock (it called `push_chunk` through
@@ -1080,14 +1106,409 @@ struct TerminalSession {
     /// of an actor's write.
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     #[allow(dead_code)]
-    child: Box<dyn Child + Send + Sync>,
+    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     shared: Arc<Mutex<Shared>>,
     rows: u16,
     cols: u16,
     title: Option<String>,
     input_leases: BTreeMap<String, ActiveInputLease>,
-    // Kept so the reader thread is owned by the session; detached on drop.
+    reader_closed: Arc<AtomicBool>,
+    // Closing the session wakes the reader's bounded polling loop before its
+    // handle detaches, even when another process still holds the slave open.
     _reader: JoinHandle<()>,
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        self.reader_closed.store(true, Ordering::Release);
+    }
+}
+
+fn prepare_pty_writer(master: &dyn MasterPty) -> Result<Box<dyn Write + Send>, TerminalError> {
+    #[cfg(unix)]
+    if let Some(fd) = master.as_raw_fd() {
+        use std::os::fd::BorrowedFd;
+        // SAFETY: master owns this descriptor while it is borrowed. This
+        // writer owns its close-on-exec duplicate independently of master.
+        let owned = unsafe { BorrowedFd::borrow_raw(fd) }
+            .try_clone_to_owned()
+            .map_err(|error| TerminalError::Backend(error.to_string()))?;
+        return Ok(Box::new(NativePtyWriter {
+            file: std::fs::File::from(owned),
+        }));
+    }
+    master
+        .take_writer()
+        .map_err(|error| TerminalError::Backend(error.to_string()))
+}
+
+#[cfg(unix)]
+struct NativePtyWriter {
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Write for NativePtyWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.file.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for NativePtyWriter {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        let fd = self.file.as_raw_fd();
+        let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        // Preserve the backend's best-effort newline/EOT on final close, but
+        // never wait for a slave-side reader during descriptor teardown.
+        // SAFETY: self.file owns fd throughout these descriptor operations.
+        if unsafe { libc::tcgetattr(fd, &mut termios) } != 0 || termios.c_cc[libc::VEOF] == 0 {
+            return;
+        }
+        if let Ok(mut nonblocking) = NonblockingPty::new(fd) {
+            let end = [b'\n', termios.c_cc[libc::VEOF]];
+            // SAFETY: fd is nonblocking and end is valid for its full length.
+            // Partial writes and errors are acceptable for best-effort EOT.
+            let _written = unsafe { libc::write(fd, end.as_ptr().cast(), end.len()) };
+            let _restored = nonblocking.restore();
+        }
+    }
+}
+
+struct PtyReader {
+    inner: Box<dyn Read + Send>,
+    #[cfg(unix)]
+    fd: Option<std::os::fd::RawFd>,
+}
+
+impl PtyReader {
+    fn prepare(master: &dyn MasterPty) -> Result<Self, TerminalError> {
+        #[cfg(unix)]
+        if let Some(fd) = master.as_raw_fd() {
+            use std::os::fd::{AsRawFd, BorrowedFd};
+            // SAFETY: master owns this descriptor for the duration of this
+            // borrow. The reader receives its own close-on-exec duplicate.
+            let owned = unsafe { BorrowedFd::borrow_raw(fd) }
+                .try_clone_to_owned()
+                .map_err(|error| TerminalError::Backend(error.to_string()))?;
+            let file = std::fs::File::from(owned);
+            return Ok(Self {
+                fd: Some(file.as_raw_fd()),
+                inner: Box::new(file),
+            });
+        }
+        let reader = master
+            .try_clone_reader()
+            .map_err(|error| TerminalError::Backend(error.to_string()))?;
+        // Backends without a native Unix descriptor retain their backend's
+        // blocking-read contract; polling cancellation applies to native Unix
+        // PTYs only. Closing their backend handle remains the wakeup path.
+        Ok(Self {
+            inner: reader,
+            #[cfg(unix)]
+            fd: None,
+        })
+    }
+
+    fn read(&mut self, bytes: &mut [u8], closed: &AtomicBool) -> std::io::Result<usize> {
+        loop {
+            if closed.load(Ordering::Acquire) {
+                return Ok(0);
+            }
+            #[cfg(unix)]
+            if let Some(fd) = self.fd {
+                let mut readiness = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: fd is owned by self.inner and stays open throughout
+                // this call. Only this thread reads from the master.
+                let ready = unsafe { libc::poll(&mut readiness, 1, 100) };
+                if ready == 0 {
+                    continue;
+                }
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(error);
+                }
+                if closed.load(Ordering::Acquire) {
+                    return Ok(0);
+                }
+            }
+            let read = self.inner.read(bytes);
+            #[cfg(unix)]
+            if self.fd.is_some() {
+                match &read {
+                    // The backend treats a closed slave as EOF. Linux PTYs
+                    // report that condition as EIO on their master descriptor.
+                    Err(error) if error.raw_os_error() == Some(libc::EIO) => return Ok(0),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            return read;
+        }
+    }
+
+    fn answer_queries(
+        &self,
+        replies: &[Vec<u8>],
+        writer: &mut dyn Write,
+        closed: &AtomicBool,
+    ) -> std::io::Result<()> {
+        #[cfg(unix)]
+        if let Some(fd) = self.fd {
+            // The caller holds the shared writer mutex. All ordinary input
+            // uses that mutex too, so temporarily changing the shared file
+            // flags here cannot change another input operation's semantics.
+            let mut nonblocking = NonblockingPty::new(fd)?;
+            let written = replies
+                .iter()
+                .try_for_each(|reply| nonblocking.write_all(reply, closed));
+            let restored = nonblocking.restore();
+            return written.and(restored);
+        }
+        for reply in replies {
+            if closed.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            writer.write_all(reply)?;
+        }
+        writer.flush()
+    }
+}
+
+#[cfg(unix)]
+struct NonblockingPty {
+    fd: std::os::fd::RawFd,
+    original_flags: Option<libc::c_int>,
+}
+
+#[cfg(unix)]
+impl NonblockingPty {
+    fn new(fd: std::os::fd::RawFd) -> std::io::Result<Self> {
+        // SAFETY: PtyReader owns fd throughout this scoped operation.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        set_pty_flags(fd, flags | libc::O_NONBLOCK)?;
+        Ok(Self {
+            fd,
+            original_flags: Some(flags),
+        })
+    }
+
+    fn write_all(&self, mut bytes: &[u8], closed: &AtomicBool) -> std::io::Result<()> {
+        while !bytes.is_empty() {
+            if closed.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let mut readiness = libc::pollfd {
+                fd: self.fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            // SAFETY: fd remains owned by PtyReader and readiness points to
+            // one live pollfd. No blocking write follows a readiness race.
+            let ready = unsafe { libc::poll(&mut readiness, 1, 100) };
+            if ready == 0 {
+                continue;
+            }
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            // SAFETY: bytes is valid for the requested length; fd is open and
+            // nonblocking until this scoped guard restores its original flags.
+            let written = unsafe { libc::write(self.fd, bytes.as_ptr().cast(), bytes.len()) };
+            if written < 0 {
+                let error = std::io::Error::last_os_error();
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) {
+                    continue;
+                }
+                return Err(error);
+            }
+            if written == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
+            }
+            bytes = &bytes[written as usize..];
+        }
+        Ok(())
+    }
+
+    fn restore(&mut self) -> std::io::Result<()> {
+        if let Some(flags) = self.original_flags {
+            set_pty_flags(self.fd, flags)?;
+            self.original_flags = None;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for NonblockingPty {
+    fn drop(&mut self) {
+        let _restored = self.restore();
+    }
+}
+
+#[cfg(unix)]
+fn set_pty_flags(fd: std::os::fd::RawFd, flags: libc::c_int) -> std::io::Result<()> {
+    loop {
+        // SAFETY: the scoped query writer owns this live descriptor.
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags) } >= 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// One already-authorized input operation, independent of the manager lock.
+pub(crate) struct PreparedInput {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    shared: Arc<Mutex<Shared>>,
+    events: Arc<Mutex<EventBus>>,
+    session_id: String,
+    actor: InputActor,
+    authorization: ActorAuthorization,
+}
+
+impl PreparedInput {
+    pub(crate) fn write(self, bytes: &[u8]) -> Result<(), TerminalError> {
+        let mut writer = self.writer.lock().map_err(|_| TerminalError::Poisoned)?;
+        let mut state = self.shared.lock().map_err(|_| TerminalError::Poisoned)?;
+        if state.secret.is_some() && !self.actor.kind.is_human() {
+            if let Ok(mut bus) = self.events.lock() {
+                bus.emit(
+                    self.session_id.clone(),
+                    TerminalEvent::InputRejected {
+                        actor: self.actor.clone(),
+                        reason: InputRejectionReason::SecretInputActive,
+                    },
+                );
+            }
+            return Err(TerminalError::SecretInputActive {
+                session_id: self.session_id,
+                actor: self.actor,
+            });
+        }
+        // The writer serializes inputs. Mark the boundary under the same lock
+        // as the secret check, then let output processing continue during I/O.
+        state.input_in_progress = true;
+        drop(state);
+        let _writing = InputWriteGuard(Arc::clone(&self.shared));
+        writer.write_all(bytes)?;
+        writer.flush()?;
+        let state = self.shared.lock().map_err(|_| TerminalError::Poisoned)?;
+        if self.authorization.secret_active || state.secret.is_some() {
+            return Ok(());
+        }
+        if let Ok(mut bus) = self.events.lock() {
+            bus.emit(
+                self.session_id,
+                TerminalEvent::InputAccepted {
+                    actor: self.actor,
+                    input_bytes: bytes.len(),
+                    lease_id: self.authorization.lease_id,
+                },
+            );
+        }
+        Ok(())
+    }
+}
+
+struct InputWriteGuard(Arc<Mutex<Shared>>);
+
+impl Drop for InputWriteGuard {
+    fn drop(&mut self) {
+        let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        state.input_in_progress = false;
+    }
+}
+
+/// The session's status once its reader has stopped.
+///
+/// The child is locked for each `try_wait` alone, never across the sleep
+/// between them: a child that closed its terminal but lives on keeps this
+/// polling for the whole window, and every status query, signal and close for
+/// the session waits on that same lock while holding the manager's.
+fn reader_status(
+    error: Option<std::io::Error>,
+    child: &Mutex<Box<dyn Child + Send + Sync>>,
+) -> TerminalSessionStatus {
+    let deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        let exit = child
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .try_wait();
+        match exit {
+            Ok(Some(exit)) => {
+                return TerminalSessionStatus::Exited(i32::try_from(exit.exit_code()).ok());
+            }
+            Ok(None) if error.is_some() => {
+                return TerminalSessionStatus::Error(
+                    error.as_ref().map(ToString::to_string).unwrap_or_default(),
+                );
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => return TerminalSessionStatus::Exited(None),
+        }
+    }
+}
+
+/// Terminate a direct child and collect its exit before releasing its handle.
+/// A failed signal can race with an exit; inspect and reap that child too.
+fn stop_and_reap_child(child: &mut dyn Child) -> std::io::Result<bool> {
+    if child.try_wait()?.is_some() {
+        return Ok(false);
+    }
+    let killed = child.kill();
+    let may_wait = killed.is_ok()
+        || child.try_wait()?.is_some()
+        || killed.as_ref().err().is_some_and(|error| {
+            let missing = error.kind() == std::io::ErrorKind::NotFound;
+            #[cfg(unix)]
+            let missing = missing || error.raw_os_error() == Some(libc::ESRCH);
+            missing
+        });
+    if !may_wait {
+        return killed.map(|()| true);
+    }
+    let reaped = child.wait();
+    match (killed, reaped) {
+        (_, Ok(_)) => Ok(true),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(kill_error), Err(wait_error)) => Err(std::io::Error::other(format!(
+            "terminate terminal child: {kill_error}; reap terminal child: {wait_error}"
+        ))),
+    }
 }
 
 /// Owns all live terminal sessions for a host. Hosts wrap this in
@@ -1110,12 +1531,13 @@ pub struct TerminalSessionManager {
 impl Drop for TerminalSessionManager {
     fn drop(&mut self) {
         for session in self.sessions.values_mut() {
-            let process_exited = session.child.try_wait().ok().flatten().is_some();
-            if !process_exited {
-                // Drop cannot report cleanup failures. Closing the PTY fields
-                // immediately afterwards remains the backend fallback.
-                let _cleanup_result = session.child.kill();
-            }
+            let mut child = session
+                .child
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            // Drop cannot report cleanup failures. Closing the PTY fields
+            // immediately afterwards remains the backend fallback.
+            let _cleanup_result = stop_and_reap_child(&mut **child);
         }
     }
 }
@@ -1201,6 +1623,10 @@ impl TerminalSessionManager {
         if let Some(cwd) = &spec.cwd {
             command.cwd(cwd);
         }
+        // Acquire every PTY duplicate before a child exists. An exhausted FD
+        // table must fail without leaving a successfully spawned process.
+        let writer = prepare_pty_writer(&*pair.master)?;
+        let mut reader = PtyReader::prepare(&*pair.master)?;
         let child = pair
             .slave
             .spawn_command(command)
@@ -1208,20 +1634,12 @@ impl TerminalSessionManager {
         // The slave handle is no longer needed once the child holds it.
         drop(pair.slave);
 
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|error| TerminalError::Backend(error.to_string()))?;
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|error| TerminalError::Backend(error.to_string()))?;
-
         // Phase 2: Initialize the VT screen model with the specified dimensions.
         let parser =
             vt100::Parser::new_with_callbacks(spec.rows, spec.cols, 0, TerminalQueries::default());
 
         let shared = Arc::new(Mutex::new(Shared {
+            input_in_progress: false,
             ring: Vec::new(),
             ring_capacity: DEFAULT_RING_CAPACITY,
             subscribers: Vec::new(),
@@ -1237,47 +1655,86 @@ impl TerminalSessionManager {
             secret: None,
         }));
 
+        let child = Arc::new(Mutex::new(child));
+        let reader_child = Arc::clone(&child);
         let reader_shared = Arc::clone(&shared);
         let writer = Arc::new(Mutex::new(writer));
         let reader_writer = Arc::clone(&writer);
-        let reader = std::thread::spawn(move || {
-            let mut buffer = [0u8; 8192];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        let replies = match reader_shared.lock() {
-                            Ok(mut state) => state.push_chunk(&buffer[..read]),
-                            Err(_) => Vec::new(),
-                        };
-                        // Sent with no `Shared` lock held, so answering a query
-                        // can never wait on a writer the manager is using.
-                        if !replies.is_empty()
-                            && let Ok(mut writer) = reader_writer.lock()
-                        {
-                            for reply in replies {
-                                if writer.write_all(&reply).is_err() {
-                                    break;
+        let reader_closed = Arc::new(AtomicBool::new(false));
+        let reader_shutdown = Arc::clone(&reader_closed);
+        let reader = std::thread::Builder::new()
+            .name("terminal-reader".to_string())
+            .spawn(move || {
+                let mut buffer = [0u8; 8192];
+                let reader_error = loop {
+                    match reader.read(&mut buffer, &reader_shutdown) {
+                        Ok(0) => break None,
+                        Ok(read) => {
+                            let replies = match reader_shared.lock() {
+                                Ok(mut state) => state.push_chunk(&buffer[..read]),
+                                Err(_) => Vec::new(),
+                            };
+                            // Wait for the writer without holding `Shared`, and
+                            // stop waiting when the session closes. A blocked input
+                            // must not retain the reader after teardown.
+                            if !replies.is_empty() {
+                                let writer = loop {
+                                    if reader_shutdown.load(Ordering::Acquire) {
+                                        break None;
+                                    }
+                                    match reader_writer.try_lock() {
+                                        Ok(writer) => break Some(writer),
+                                        Err(std::sync::TryLockError::Poisoned(_)) => break None,
+                                        Err(std::sync::TryLockError::WouldBlock) => {
+                                            std::thread::sleep(Duration::from_millis(10));
+                                        }
+                                    }
+                                };
+                                if let Some(mut writer) = writer
+                                    && let Err(error) = reader.answer_queries(
+                                        &replies,
+                                        &mut **writer,
+                                        &reader_shutdown,
+                                    )
+                                {
+                                    break Some(error);
                                 }
                             }
-                            let _ = writer.flush();
                         }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(error) => break Some(error),
                     }
-                    Err(_) => break,
+                };
+                let status = reader_status(reader_error, &reader_child);
+                if let Ok(mut state) = reader_shared.lock()
+                    && matches!(state.status, TerminalSessionStatus::Running)
+                {
+                    state.status = status;
+                    // Phase 3: emit while still holding `Shared`, per the
+                    // `Shared` -> `EventBus` lock order.
+                    let session_id = state.id.clone();
+                    if let TerminalSessionStatus::Exited(code) = state.status
+                        && let Ok(mut bus) = state.events.lock()
+                    {
+                        bus.emit(session_id, TerminalEvent::ProcessExited { code });
+                    }
                 }
-            }
-            if let Ok(mut state) = reader_shared.lock()
-                && matches!(state.status, TerminalSessionStatus::Running)
-            {
-                state.status = TerminalSessionStatus::Exited(None);
-                // Phase 3: emit while still holding `Shared`, per the
-                // `Shared` -> `EventBus` lock order.
-                let session_id = state.id.clone();
-                if let Ok(mut bus) = state.events.lock() {
-                    bus.emit(session_id, TerminalEvent::ProcessExited { code: None });
+            })
+            .map_err(|error| {
+                // Thread creation is the last fallible step after spawning.
+                // The failed spawn drops its captured PTY handles; explicitly
+                // terminate and reap the direct child as well.
+                let mut child = child
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let cleanup = stop_and_reap_child(&mut **child);
+                match cleanup {
+                    Ok(_) => TerminalError::Backend(format!("start terminal reader: {error}")),
+                    Err(cleanup) => TerminalError::Backend(format!(
+                        "start terminal reader: {error}; clean up terminal child: {cleanup}"
+                    )),
                 }
-            }
-        });
+            })?;
 
         self.sessions.insert(
             id.clone(),
@@ -1290,6 +1747,7 @@ impl TerminalSessionManager {
                 cols: spec.cols,
                 title: spec.title,
                 input_leases: BTreeMap::new(),
+                reader_closed,
                 _reader: reader,
             },
         );
@@ -1322,7 +1780,7 @@ impl TerminalSessionManager {
     /// Write one complete input chunk on behalf of an identified actor.
     ///
     /// Non-human actors must hold a shared or exclusive lease. Multiple shared
-    /// holders can write, but each call remains atomic under the manager lock.
+    /// holders can write, but each call remains atomic under the session writer.
     /// Human input needs no lease and revokes a non-human exclusive lease
     /// before writing.
     pub fn write_as(
@@ -1332,6 +1790,17 @@ impl TerminalSessionManager {
         lease_id: Option<&str>,
         bytes: &[u8],
     ) -> Result<(), TerminalError> {
+        self.prepare_write_as(id, actor, lease_id)?.write(bytes)
+    }
+
+    /// Authorize while the host holds its manager lock; perform blocking input
+    /// using the returned handle only after releasing that lock.
+    pub(crate) fn prepare_write_as(
+        &mut self,
+        id: &str,
+        actor: InputActor,
+        lease_id: Option<&str>,
+    ) -> Result<PreparedInput, TerminalError> {
         let authorization = match self.authorize_actor(id, &actor, lease_id) {
             Ok(authorization) => authorization,
             Err(error) => {
@@ -1345,29 +1814,14 @@ impl TerminalSessionManager {
             .sessions
             .get_mut(id)
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
-        let mut writer = session
-            .writer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        writer.write_all(bytes)?;
-        writer.flush()?;
-
-        // A secret is typed by a person, so this write is accepted — but
-        // announcing it would publish how many bytes the secret is.
-        if authorization.secret_active {
-            return Ok(());
-        }
-        if let Ok(mut bus) = self.events.lock() {
-            bus.emit(
-                id.to_string(),
-                TerminalEvent::InputAccepted {
-                    actor,
-                    input_bytes: bytes.len(),
-                    lease_id: authorization.lease_id,
-                },
-            );
-        }
-        Ok(())
+        Ok(PreparedInput {
+            writer: Arc::clone(&session.writer),
+            shared: Arc::clone(&session.shared),
+            session_id: id.to_string(),
+            events: Arc::clone(&self.events),
+            actor,
+            authorization,
+        })
     }
 
     /// Put a session into secret input mode.
@@ -1399,6 +1853,11 @@ impl TerminalSessionManager {
             if state.secret.is_some() {
                 None
             } else {
+                if state.input_in_progress {
+                    return Err(TerminalError::InputInProgress {
+                        session_id: id.to_string(),
+                    });
+                }
                 let screen = state.parser.screen();
                 let alt_screen = screen.alternate_screen();
                 let screen_seq = state.screen_seq;
@@ -1453,6 +1912,11 @@ impl TerminalSessionManager {
         let ended = {
             let mut state = session.shared.lock().map_err(|_| TerminalError::Poisoned)?;
             if state.secret.is_some() {
+                if state.input_in_progress {
+                    return Err(TerminalError::InputInProgress {
+                        session_id: id.to_string(),
+                    });
+                }
                 let quiet_for_ms = state.last_output.elapsed().as_millis() as u64;
                 if quiet_for_ms < SECRET_INPUT_SETTLE_MS {
                     return Err(TerminalError::SecretInputSettling {
@@ -1468,12 +1932,23 @@ impl TerminalSessionManager {
                 // grid after the shield drops. Start from a clean authoritative
                 // screen; the next program output repopulates it without ever
                 // exposing the protected interval.
+                let screen = state.parser.screen();
+                let modes: [(bool, &[u8]); 3] = [
+                    (screen.application_cursor(), b"\x1b[?1h"),
+                    (screen.bracketed_paste(), b"\x1b[?2004h"),
+                    (screen.alternate_screen(), b"\x1b[?1049h"),
+                ];
                 state.parser = vt100::Parser::new_with_callbacks(
                     state.rows,
                     state.cols,
                     0,
                     TerminalQueries::default(),
                 );
+                for (enabled, sequence) in modes {
+                    if enabled {
+                        state.parser.process(sequence);
+                    }
+                }
                 state.screen_seq += 1;
             }
             ended
@@ -1726,10 +2201,15 @@ impl TerminalSessionManager {
             .sessions
             .get_mut(id)
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
-        if let Some(exit) = session.child.try_wait()? {
+        if let Some(exit) = session
+            .child
+            .lock()
+            .map_err(|_| TerminalError::Poisoned)?
+            .try_wait()?
+        {
             let code = i32::try_from(exit.exit_code()).ok();
             if let Ok(mut state) = session.shared.lock() {
-                state.status = TerminalSessionStatus::Exited(code);
+                state.record_exit(code);
             }
             return Err(TerminalError::NotRunning(id.to_string()));
         }
@@ -1756,30 +2236,28 @@ impl TerminalSessionManager {
             .sessions
             .get_mut(id)
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
-        session.child.kill()?;
+        session
+            .child
+            .lock()
+            .map_err(|_| TerminalError::Poisoned)?
+            .kill()?;
         if let Ok(mut state) = session.shared.lock() {
-            state.status = TerminalSessionStatus::Exited(None);
+            state.record_exit(None);
         }
 
-        // Phase 3: emit after the `Shared` lock above is released, so
-        // `EventBus` is locked alone here.
-        if let Ok(mut bus) = self.events.lock() {
-            bus.emit(id.to_string(), TerminalEvent::ProcessExited { code: None });
-        }
         Ok(())
     }
 
     /// Kill and remove a session from the manager.
     pub fn close(&mut self, id: &str) -> Result<(), TerminalError> {
-        let process_exited = self
+        let session = self
             .sessions
             .get_mut(id)
-            .ok_or_else(|| TerminalError::NotFound(id.to_string()))?
-            .child
-            .try_wait()?
-            .is_some();
-        if !process_exited {
-            self.kill(id)?;
+            .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
+        let stopped =
+            stop_and_reap_child(&mut **session.child.lock().map_err(|_| TerminalError::Poisoned)?)?;
+        if stopped && let Ok(mut state) = session.shared.lock() {
+            state.record_exit(None);
         }
         self.sessions.remove(id);
         Ok(())
@@ -1789,10 +2267,11 @@ impl TerminalSessionManager {
     #[allow(dead_code)]
     pub fn status(&mut self, id: &str) -> Option<TerminalSessionStatus> {
         let session = self.sessions.get_mut(id)?;
-        if let Ok(Some(exit)) = session.child.try_wait() {
+        let exit = session.child.lock().ok()?.try_wait();
+        if let Ok(Some(exit)) = exit {
             let code = i32::try_from(exit.exit_code()).ok();
             if let Ok(mut state) = session.shared.lock() {
-                state.status = TerminalSessionStatus::Exited(code);
+                state.record_exit(code);
             }
         }
         session.shared.lock().ok().map(|state| state.status.clone())
@@ -1823,7 +2302,7 @@ impl TerminalSessionManager {
             .get(id)
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
         let mut state = session.shared.lock().map_err(|_| TerminalError::Poisoned)?;
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(SUBSCRIPTION_CAPACITY);
         state.subscribers.push(tx);
         Ok(TerminalSubscription {
             backlog: state.ring.clone(),
@@ -1836,15 +2315,16 @@ impl TerminalSessionManager {
     /// by `session_id`. There is no per-session subscribe in this phase —
     /// callers that want one session's events filter the stream themselves.
     pub fn subscribe_events(&self) -> EventSubscription {
-        let (tx, rx) = channel();
-        let backlog = match self.events.lock() {
+        let (tx, rx) = sync_channel(SUBSCRIPTION_CAPACITY);
+        let (backlog, latest_seq) = match self.events.lock() {
             Ok(mut bus) => {
                 bus.subscribers.push(tx);
-                bus.backlog.clone()
+                (bus.backlog.clone(), bus.seq)
             }
-            Err(_) => Vec::new(),
+            Err(_) => (Vec::new(), 0),
         };
         EventSubscription {
+            latest_seq,
             backlog,
             receiver: rx,
         }
@@ -2100,6 +2580,8 @@ fn deliver_signal(
         .or_else(|| {
             session
                 .child
+                .lock()
+                .ok()?
                 .process_id()
                 .and_then(|process_id| libc::pid_t::try_from(process_id).ok())
         })
@@ -2131,7 +2613,12 @@ fn deliver_signal(
     signal: TerminalSignal,
 ) -> Result<(), TerminalError> {
     match signal {
-        TerminalSignal::Kill => session.child.kill().map_err(TerminalError::Io),
+        TerminalSignal::Kill => session
+            .child
+            .lock()
+            .map_err(|_| TerminalError::Poisoned)?
+            .kill()
+            .map_err(TerminalError::Io),
         TerminalSignal::Interrupt | TerminalSignal::Terminate => {
             Err(TerminalError::UnsupportedSignal(signal))
         }
@@ -2259,6 +2746,743 @@ pub(crate) mod test_shell {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[derive(Clone, Debug)]
+    struct CleanupChild {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        signal_failed: bool,
+        wait_failed: bool,
+    }
+
+    impl portable_pty::ChildKiller for CleanupChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.calls.lock().unwrap().push("kill");
+            if self.signal_failed {
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl Child for CleanupChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            self.calls.lock().unwrap().push("wait");
+            if self.wait_failed {
+                Err(std::io::Error::other("wait failed"))
+            } else {
+                Ok(portable_pty::ExitStatus::with_exit_code(0))
+            }
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    #[test]
+    fn direct_child_cleanup_waits_after_kill_and_after_an_exit_race() {
+        for signal_failed in [false, true] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let mut child = CleanupChild {
+                calls: Arc::clone(&calls),
+                signal_failed,
+                wait_failed: false,
+            };
+            assert!(stop_and_reap_child(&mut child).unwrap());
+            assert_eq!(*calls.lock().unwrap(), ["kill", "wait"]);
+        }
+    }
+
+    #[test]
+    fn direct_child_cleanup_reports_signal_and_reap_failures_together() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut child = CleanupChild {
+            calls: Arc::clone(&calls),
+            signal_failed: true,
+            wait_failed: true,
+        };
+        let error = stop_and_reap_child(&mut child).unwrap_err().to_string();
+        assert!(error.contains("terminate terminal child:"));
+        assert!(error.contains("reap terminal child: wait failed"));
+        assert_eq!(*calls.lock().unwrap(), ["kill", "wait"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_closed_slave_is_eof_for_the_native_reader() {
+        let pair = allocate_pty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+        let mut reader = PtyReader::prepare(&*pair.master).unwrap();
+        let mut command = CommandBuilder::new(test_shell::program());
+        command.args(["-c", "exit 0"]);
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        child.wait().unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::clone(&closed);
+        let (finished, completion) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            finished.send(reader.read(&mut [0; 16], &shutdown)).unwrap();
+        });
+        let result = completion.recv_timeout(Duration::from_secs(2));
+        closed.store(true, Ordering::Release);
+        worker.join().unwrap();
+        assert_eq!(
+            result
+                .expect("reader did not observe the exited child's closed slave")
+                .unwrap(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closing_interrupts_query_writes_and_restores_normal_input_flags() {
+        let pair = allocate_pty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+        let fd = pair.master.as_raw_fd().unwrap();
+        let mut termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(fd, &mut termios) }, 0);
+        unsafe { libc::cfmakeraw(&mut termios) };
+        assert_eq!(unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) }, 0);
+        let reader = PtyReader::prepare(&*pair.master).unwrap();
+        let mut writer = prepare_pty_writer(&*pair.master).unwrap();
+        writer.write_all(b"x").unwrap();
+        // Darwin adds the kernel's FWASWRITTEN status on the first write.
+        // Establish the baseline after ordinary input, then require every
+        // flag to survive query cancellation and final writer cleanup.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(flags & libc::O_NONBLOCK, 0);
+        let closed = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::clone(&closed);
+        let (finished, completion) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = reader.answer_queries(&[vec![b'x'; 1024 * 1024]], &mut *writer, &shutdown);
+            drop(writer);
+            finished.send(result).unwrap();
+        });
+        // No slave-side reader consumes the raw input, so the query write
+        // fills the PTY queue. Close must interrupt it with the slave alive.
+        let blocked = completion.recv_timeout(Duration::from_millis(100)).is_err();
+        closed.store(true, Ordering::Release);
+        let result = completion.recv_timeout(Duration::from_secs(1));
+        // Release the fixture's held slave before joining, so a regression in
+        // final EOT cleanup reports a timeout instead of hanging the suite.
+        drop(pair.slave);
+        worker.join().unwrap();
+        result
+            .expect("query writer did not finish closing")
+            .unwrap();
+        assert!(blocked, "fixture did not apply PTY backpressure");
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFL) }, flags);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closing_a_session_releases_the_reader_when_the_slave_stays_open() {
+        let mut manager = TerminalSessionManager::new();
+        let id = manager.open("held-slave", test_shell::spec()).unwrap();
+        let session = manager.sessions.get(&id).unwrap();
+        let retained_writer = Arc::downgrade(&session.writer);
+        let retained_shared = Arc::downgrade(&session.shared);
+        // Keeping the slave open models a background descendant inheriting
+        // the terminal after the shell exits, without leaving such a process
+        // behind when this test fails.
+        let slave = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(session.master.tty_name().unwrap())
+            .unwrap();
+        manager.close(&id).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while retained_shared.upgrade().is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            retained_shared.upgrade().is_none(),
+            "reader thread stayed alive after close"
+        );
+        assert!(
+            retained_writer.upgrade().is_none(),
+            "reader retained its writer descriptor"
+        );
+        drop(slave);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_manager_releases_the_reader_when_the_slave_stays_open() {
+        let mut manager = TerminalSessionManager::new();
+        let id = manager
+            .open("dropped-held-slave", test_shell::spec())
+            .unwrap();
+        let session = manager.sessions.get(&id).unwrap();
+        let retained = Arc::downgrade(&session.shared);
+        let slave = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(session.master.tty_name().unwrap())
+            .unwrap();
+        drop(manager);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while retained.upgrade().is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            retained.upgrade().is_none(),
+            "reader thread stayed alive after manager drop"
+        );
+        drop(slave);
+    }
+
+    #[test]
+    fn event_subscribers_that_stop_reading_are_disconnected_without_blocking_others() {
+        let manager = TerminalSessionManager::new();
+        let slow = manager.subscribe_events();
+        let fast = manager.subscribe_events();
+        for _ in 0..SUBSCRIPTION_CAPACITY + 1 {
+            manager
+                .events
+                .lock()
+                .unwrap()
+                .emit("bounded".to_string(), TerminalEvent::SessionOpened);
+            assert!(fast.receiver.recv_timeout(Duration::from_secs(1)).is_ok());
+        }
+        assert_eq!(manager.events.lock().unwrap().subscribers.len(), 1);
+        for _ in 0..SUBSCRIPTION_CAPACITY {
+            assert!(slow.receiver.try_recv().is_ok());
+        }
+        assert!(matches!(
+            slow.receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+        let resumed = manager.subscribe_events();
+        assert_eq!(resumed.latest_seq, (SUBSCRIPTION_CAPACITY + 1) as u64);
+        assert_eq!(resumed.backlog.last().unwrap().seq, resumed.latest_seq);
+    }
+
+    #[test]
+    fn raw_subscribers_have_bounded_nonblocking_queues() {
+        let events = Arc::new(Mutex::new(EventBus::default()));
+        let mut state = Shared {
+            input_in_progress: false,
+            ring: Vec::new(),
+            ring_capacity: DEFAULT_RING_CAPACITY,
+            subscribers: Vec::new(),
+            status: TerminalSessionStatus::Running,
+            parser: vt100::Parser::new_with_callbacks(24, 80, 0, TerminalQueries::default()),
+            screen_seq: 0,
+            last_output: Instant::now(),
+            spec_title: None,
+            rows: 24,
+            cols: 80,
+            id: "bounded".to_string(),
+            events,
+            secret: None,
+        };
+        let (slow_tx, slow_rx) = sync_channel(SUBSCRIPTION_CAPACITY);
+        let (fast_tx, fast_rx) = sync_channel(SUBSCRIPTION_CAPACITY);
+        state.subscribers.extend([slow_tx, fast_tx]);
+        for _ in 0..SUBSCRIPTION_CAPACITY + 1 {
+            let _replies = state.push_chunk(b"x");
+            assert_eq!(fast_rx.recv_timeout(Duration::from_secs(1)).unwrap(), b"x");
+        }
+        assert_eq!(state.subscribers.len(), 1);
+        for _ in 0..SUBSCRIPTION_CAPACITY {
+            assert_eq!(slow_rx.try_recv().unwrap(), b"x");
+        }
+        assert!(matches!(
+            slow_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+        assert_eq!(state.ring.len(), SUBSCRIPTION_CAPACITY + 1);
+    }
+
+    #[test]
+    fn blocked_input_does_not_hold_the_manager_or_other_sessions() -> Result<(), TerminalError> {
+        struct BlockingWriter {
+            started: SyncSender<()>,
+            released: Receiver<()>,
+        }
+        impl Write for BlockingWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.started.send(()).map_err(std::io::Error::other)?;
+                self.released
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(std::io::Error::other)?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut manager = TerminalSessionManager::new();
+        manager.open("blocked".to_string(), test_shell::spec())?;
+        manager.open("available".to_string(), test_shell::spec())?;
+        let (started_tx, started_rx) = sync_channel(1);
+        let (release_tx, release_rx) = sync_channel(1);
+        manager.sessions.get_mut("blocked").unwrap().writer =
+            Arc::new(Mutex::new(Box::new(BlockingWriter {
+                started: started_tx,
+                released: release_rx,
+            })));
+        let manager = Arc::new(Mutex::new(manager));
+        let input = manager.lock().unwrap().prepare_write_as(
+            "blocked",
+            InputActor {
+                kind: InputActorKind::Human,
+                id: "local".to_string(),
+            },
+            None,
+        )?;
+        let writing = std::thread::spawn(move || input.write(&vec![b'x'; 1024 * 1024]));
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        {
+            let mut available = manager
+                .try_lock()
+                .expect("blocked write must release the manager");
+            assert!(available.screen("available").is_some());
+            available.close("available")?;
+        }
+        release_tx.send(()).unwrap();
+        writing.join().unwrap()?;
+        Ok(())
+    }
+
+    #[test]
+    fn normal_exit_events_have_codes_and_are_emitted_once() -> Result<(), TerminalError> {
+        let mut manager = TerminalSessionManager::new();
+        let events = manager.subscribe_events();
+        for index in 0..40 {
+            let id = format!("exit-code-{index}");
+            let args = if cfg!(windows) {
+                vec!["/c".into(), "exit 3".into()]
+            } else {
+                vec!["-c".into(), "exit 3".into()]
+            };
+            manager.open(
+                &id,
+                TerminalOpenSpec {
+                    program: Some(test_shell::program()),
+                    args,
+                    ..TerminalOpenSpec::default()
+                },
+            )?;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let code = loop {
+                // ConPTY may retain its output pipe until close; status polling
+                // must publish the exit even without a reader EOF.
+                #[cfg(windows)]
+                manager.status(&id);
+                assert!(Instant::now() < deadline, "no exit event for {id}");
+                if let Ok(envelope) = events.receiver.recv_timeout(Duration::from_millis(10))
+                    && envelope.session_id == id
+                    && let TerminalEvent::ProcessExited { code } = envelope.event
+                {
+                    break code;
+                }
+            };
+            assert_eq!(code, Some(3));
+            for _ in 0..3 {
+                assert_eq!(
+                    manager.status(&id),
+                    Some(TerminalSessionStatus::Exited(Some(3)))
+                );
+            }
+            manager.close(&id)?;
+            assert!(
+                !events
+                    .receiver
+                    .try_iter()
+                    .any(|event| event.session_id == id
+                        && matches!(event.event, TerminalEvent::ProcessExited { .. })),
+                "duplicate exit event for {id}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reader_eof_with_a_live_child_has_a_bounded_unknown_exit() {
+        let child: Mutex<Box<dyn Child + Send + Sync>> = Mutex::new(Box::new(CleanupChild {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            signal_failed: false,
+            wait_failed: false,
+        }));
+        let started = Instant::now();
+        assert_eq!(
+            reader_status(None, &child),
+            TerminalSessionStatus::Exited(None)
+        );
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn reader_error_is_diagnostic_only_when_the_child_is_still_running() -> Result<(), TerminalError>
+    {
+        let mut manager = TerminalSessionManager::new();
+        manager.open("reader_status".to_string(), test_shell::spec())?;
+        let session = manager.sessions.get_mut("reader_status").unwrap();
+        assert!(matches!(
+            reader_status(Some(std::io::Error::other("reader failed")), &session.child),
+            TerminalSessionStatus::Error(_)
+        ));
+        {
+            let mut child = session.child.lock().unwrap();
+            child.kill()?;
+            child.wait()?;
+        }
+        assert!(matches!(
+            reader_status(Some(std::io::Error::other("reader EOF")), &session.child),
+            TerminalSessionStatus::Exited(Some(_))
+        ));
+        Ok(())
+    }
+
+    /// A direct child that closes every terminal descriptor and lives on puts
+    /// the reader into its exit-code wait. That wait must not hold the child
+    /// lock: `status()` takes it under the manager lock, so holding it would
+    /// stall every session's API for the length of the window.
+    #[cfg(unix)]
+    #[test]
+    fn status_is_not_blocked_while_the_reader_waits_for_an_exit_code() -> Result<(), TerminalError>
+    {
+        // macOS's `/bin/sh` is a bash whose terminal never reads as closed to
+        // the master, even with every descriptor redirected; its dash does.
+        let shell = if cfg!(target_os = "macos") {
+            "/bin/dash"
+        } else {
+            "/bin/sh"
+        };
+        let mut manager = TerminalSessionManager::new();
+        for round in 0..8 {
+            let id = format!("detached-{round}");
+            manager.open(
+                &id,
+                TerminalOpenSpec {
+                    program: Some(shell.to_string()),
+                    args: vec![
+                        "-c".to_string(),
+                        // `exec` keeps the sleeper as the direct child, so closing
+                        // the session reaps it rather than orphaning it.
+                        "exec >/dev/null 2>&1 </dev/null; exec sleep 600".to_string(),
+                    ],
+                    ..TerminalOpenSpec::default()
+                },
+            )?;
+            // Query across the whole window: from before the reader sees EOF
+            // until it gives up on an exit code.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut slowest = Duration::ZERO;
+            let mut running_queries = 0_u32;
+            loop {
+                let started = Instant::now();
+                let status = manager.status(&id);
+                slowest = slowest.max(started.elapsed());
+                match status {
+                    Some(TerminalSessionStatus::Running) => running_queries += 1,
+                    Some(TerminalSessionStatus::Exited(None)) => break,
+                    other => panic!("unexpected status for {id}: {other:?}"),
+                }
+                assert!(Instant::now() < deadline, "{id} never left the wait");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                running_queries > 0,
+                "{id}: no query landed before the reader finished"
+            );
+            assert!(
+                slowest < Duration::from_millis(100),
+                "{id}: a status query took {slowest:?} during the reader's wait"
+            );
+            manager.close(&id)?;
+        }
+        Ok(())
+    }
+
+    fn exit_event_codes(events: &EventSubscription, id: &str) -> Vec<Option<i32>> {
+        events
+            .receiver
+            .try_iter()
+            .filter(|envelope| envelope.session_id == id)
+            .filter_map(|envelope| match envelope.event {
+                TerminalEvent::ProcessExited { code } => Some(code),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Lets the reader thread race the caller for the exit, then waits for it
+    /// to finish so nothing it emits is missed. A ConPTY reader only ends when
+    /// the session closes, so there is nothing to wait for on Windows.
+    fn wait_for_reader(manager: &TerminalSessionManager, id: &str) {
+        if cfg!(unix) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !manager.sessions[id]._reader.is_finished() {
+                assert!(Instant::now() < deadline, "reader for {id} never finished");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    #[test]
+    fn killing_a_live_session_emits_exactly_one_exit_event() -> Result<(), TerminalError> {
+        let mut manager = TerminalSessionManager::new();
+        let events = manager.subscribe_events();
+        for round in 0..40 {
+            let id = format!("kill-once-{round}");
+            manager.open(&id, test_shell::spec())?;
+            manager.kill(&id)?;
+            // Every path that can observe the exit runs: `kill` itself, the
+            // reader reaching EOF, and repeated status reconciliation.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !matches!(
+                manager.status(&id),
+                Some(TerminalSessionStatus::Exited(Some(_)))
+            ) {
+                assert!(Instant::now() < deadline, "{id} was never reaped");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            wait_for_reader(&manager, &id);
+            manager.status(&id);
+            manager.close(&id)?;
+            assert_eq!(exit_event_codes(&events, &id).len(), 1, "{id}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn closing_a_live_session_emits_exactly_one_exit_event() -> Result<(), TerminalError> {
+        let mut manager = TerminalSessionManager::new();
+        let events = manager.subscribe_events();
+        for round in 0..40 {
+            let id = format!("close-once-{round}");
+            manager.open(&id, test_shell::spec())?;
+            // Keep the reader observable after the session leaves the manager.
+            let shared = Arc::clone(&manager.sessions[&id].shared);
+            manager.close(&id)?;
+            // The reader holds its own reference until it has finished racing
+            // `close` for the exit.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while cfg!(unix) && Arc::strong_count(&shared) > 1 {
+                assert!(Instant::now() < deadline, "reader for {id} never finished");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(exit_event_codes(&events, &id).len(), 1, "{id}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_exit_after_a_reader_error_is_announced_once() -> Result<(), TerminalError> {
+        let mut manager = TerminalSessionManager::new();
+        let events = manager.subscribe_events();
+        let id = manager.open("error-then-exit", test_shell::spec())?;
+        // What the reader records when it fails while the child is alive.
+        manager.sessions[&id].shared.lock().unwrap().status =
+            TerminalSessionStatus::Error("reader failed".to_string());
+        manager.sessions[&id].child.lock().unwrap().kill()?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            match manager.status(&id) {
+                Some(TerminalSessionStatus::Error(_)) => {
+                    assert!(Instant::now() < deadline, "{id} was never reaped");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                status => break status,
+            }
+        };
+        let Some(TerminalSessionStatus::Exited(Some(code))) = status else {
+            panic!("unexpected status after exit: {status:?}");
+        };
+        wait_for_reader(&manager, &id);
+        for _ in 0..3 {
+            assert_eq!(
+                manager.status(&id),
+                Some(TerminalSessionStatus::Exited(Some(code)))
+            );
+        }
+        manager.close(&id)?;
+        assert_eq!(exit_event_codes(&events, &id), [Some(code)]);
+        Ok(())
+    }
+
+    #[test]
+    fn kill_keeps_an_exit_code_that_is_already_known() -> Result<(), TerminalError> {
+        let mut manager = TerminalSessionManager::new();
+        let events = manager.subscribe_events();
+        let args = if cfg!(windows) {
+            vec!["/c".into(), "exit 3".into()]
+        } else {
+            vec!["-c".into(), "exit 3".into()]
+        };
+        let id = manager.open(
+            "known-code",
+            TerminalOpenSpec {
+                program: Some(test_shell::program()),
+                args,
+                ..TerminalOpenSpec::default()
+            },
+        )?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while manager.status(&id) != Some(TerminalSessionStatus::Exited(Some(3))) {
+            assert!(Instant::now() < deadline, "{id} never reported its code");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Killing a process that is already gone is usually refused by the
+        // platform before anything is recorded, so the recording `kill` does
+        // after a signal that was accepted is also made directly. Neither may
+        // forget what the process exited with.
+        let _already_exited = manager.kill(&id);
+        manager.sessions[&id]
+            .shared
+            .lock()
+            .unwrap()
+            .record_exit(None);
+        assert_eq!(
+            manager.metadata(&id).map(|meta| meta.status),
+            Some(TerminalSessionStatus::Exited(Some(3)))
+        );
+        manager.close(&id)?;
+        assert_eq!(exit_event_codes(&events, &id), [Some(3)]);
+        Ok(())
+    }
+
+    #[test]
+    fn authorized_input_waiting_for_the_writer_still_respects_a_new_secret_window()
+    -> Result<(), TerminalError> {
+        let mut manager = TerminalSessionManager::new();
+        manager.open("secret_pending".to_string(), test_shell::spec())?;
+        let actor = InputActor {
+            kind: InputActorKind::Agent,
+            id: "controller".to_string(),
+        };
+        let lease = manager.acquire_lease(
+            "secret_pending",
+            actor.clone(),
+            InputLeaseMode::Shared,
+            60_000,
+            None,
+        )?;
+        let input = manager.prepare_write_as("secret_pending", actor, Some(&lease.lease_id))?;
+        manager.enter_secret(
+            "secret_pending",
+            InputActor {
+                kind: InputActorKind::Human,
+                id: "local".to_string(),
+            },
+            "testing pending input",
+        )?;
+        assert!(matches!(
+            input.write(b"must not reach the PTY"),
+            Err(TerminalError::SecretInputActive { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn secret_boundaries_wait_for_input_and_failed_writes_release_them() -> Result<(), TerminalError>
+    {
+        struct ControlledWriter {
+            started: SyncSender<()>,
+            released: Receiver<()>,
+            fail: bool,
+        }
+        impl Write for ControlledWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.started.send(()).map_err(std::io::Error::other)?;
+                self.released
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(std::io::Error::other)?;
+                if self.fail {
+                    Err(std::io::Error::other("controlled write failure"))
+                } else {
+                    Ok(bytes.len())
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for (secret_active, fail) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut manager = TerminalSessionManager::new();
+            manager.open("boundary".to_string(), test_shell::spec())?;
+            let human = InputActor {
+                kind: InputActorKind::Human,
+                id: "local".to_string(),
+            };
+            if secret_active {
+                manager.enter_secret("boundary", human.clone(), "private input")?;
+            }
+            let (started_tx, started_rx) = sync_channel(1);
+            let (release_tx, release_rx) = sync_channel(1);
+            manager.sessions.get_mut("boundary").unwrap().writer =
+                Arc::new(Mutex::new(Box::new(ControlledWriter {
+                    started: started_tx,
+                    released: release_rx,
+                    fail,
+                })));
+            let input = manager.prepare_write_as("boundary", human.clone(), None)?;
+            let writing = std::thread::spawn(move || input.write(b"private bytes"));
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let transition = if secret_active {
+                manager.exit_secret("boundary", human.clone())
+            } else {
+                manager.enter_secret("boundary", human.clone(), "private input")
+            };
+            assert!(matches!(
+                transition,
+                Err(TerminalError::InputInProgress { .. })
+            ));
+            release_tx.send(()).unwrap();
+            assert_eq!(writing.join().unwrap().is_err(), fail);
+            if secret_active {
+                manager.sessions["boundary"]
+                    .shared
+                    .lock()
+                    .unwrap()
+                    .last_output =
+                    Instant::now() - Duration::from_millis(SECRET_INPUT_SETTLE_MS + 1);
+                assert!(!manager.exit_secret("boundary", human)?.active);
+                assert!(!manager.subscribe_events().backlog.iter().any(|envelope| {
+                    matches!(envelope.event, TerminalEvent::InputAccepted { .. })
+                }));
+            } else {
+                assert!(
+                    manager
+                        .enter_secret("boundary", human, "private input")?
+                        .active
+                );
+            }
+        }
+        Ok(())
+    }
 
     // Reads from a subscription until `marker` appears or `timeout` elapses.
     fn wait_for(subscription: &TerminalSubscription, marker: &str, timeout: Duration) -> bool {
@@ -3251,6 +4475,39 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         panic!("kill signal did not terminate the foreground process group");
+    }
+
+    #[test]
+    fn secret_exit_preserves_terminal_modes_without_preserving_any_text()
+    -> Result<(), TerminalError> {
+        let mut manager = TerminalSessionManager::new();
+        let id = manager.open("secret-modes", test_shell::spec())?;
+        let human = InputActor {
+            kind: InputActorKind::Human,
+            id: "human".into(),
+        };
+        {
+            let mut state = manager.sessions[&id].shared.lock().unwrap();
+            state
+                .parser
+                .process(b"\x1b[?1049h\x1b[?1h\x1b[?2004hBEFORE_WINDOW");
+        }
+        manager.enter_secret(&id, human.clone(), "mode test")?;
+        {
+            let mut state = manager.sessions[&id].shared.lock().unwrap();
+            state.parser.process(b"SECRET_WINDOW");
+            state.last_output = Instant::now() - Duration::from_secs(1);
+        }
+        manager.exit_secret(&id, human)?;
+        let screen = manager.screen(&id).unwrap();
+        assert!(
+            screen.alt_screen && screen.modes.application_cursor && screen.modes.bracketed_paste
+        );
+        assert!(!screen.secret_input);
+        assert!(!screen.lines.join("\n").contains("BEFORE_WINDOW"));
+        assert!(!screen.lines.join("\n").contains("SECRET_WINDOW"));
+        manager.close(&id)?;
+        Ok(())
     }
 
     #[test]

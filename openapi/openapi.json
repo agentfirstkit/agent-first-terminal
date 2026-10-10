@@ -3,7 +3,7 @@
   "components": {
     "parameters": {
       "LastEventId": {
-        "description": "Resume after this global event sequence when it remains in the bounded backlog",
+        "description": "Resume after this global event sequence when it remains in the bounded backlog. An invalid, too-old, or future cursor emits replay_gap before the retained backlog.",
         "in": "header",
         "name": "Last-Event-ID",
         "required": false,
@@ -364,6 +364,52 @@
         },
         "required": [
           "session_id"
+        ],
+        "type": "object"
+      },
+      "ReplayGap": {
+        "additionalProperties": false,
+        "description": "Data for the named replay_gap SSE event. This notice has no SSE id and does not advance the global terminal event sequence.",
+        "properties": {
+          "last_event_id": {
+            "description": "The supplied cursor, or null when it is not a valid unsigned decimal sequence",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "latest_seq": {
+            "description": "Latest global terminal event sequence at the same instant as the retained backlog snapshot",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "oldest_seq": {
+            "description": "First retained terminal event sequence, or null when the backlog is empty",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reason": {
+            "enum": [
+              "invalid_last_event_id",
+              "last_event_id_too_old",
+              "last_event_id_ahead"
+            ],
+            "type": "string"
+          },
+          "type": {
+            "const": "replay_gap"
+          }
+        },
+        "required": [
+          "type",
+          "reason",
+          "last_event_id",
+          "oldest_seq",
+          "latest_seq"
         ],
         "type": "object"
       },
@@ -1187,7 +1233,7 @@
   "info": {
     "description": "A bearer-protected local terminal runtime API for opening, observing, and safely coordinating human and agent control of multiple PTY sessions.",
     "title": "Agent-First Terminal API",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "openapi": "3.2.0",
@@ -1354,7 +1400,7 @@
     },
     "/v1/events": {
       "get": {
-        "description": "Each SSE id is the globally monotonic event sequence. Event payloads identify their session and never contain raw terminal bytes.",
+        "description": "Each terminal event's SSE id is its globally monotonic sequence. Event payloads identify their session and never contain raw terminal bytes. An invalid Last-Event-ID, one older than oldest_seq minus one, or one greater than latest_seq first emits a named replay_gap event without an id, then the retained backlog and live events. replay_gap carries subscription bounds; reread the session list and screens to recover current state. With no Last-Event-ID, the retained backlog is sent without a gap notice.",
         "operationId": "streamEvents",
         "parameters": [
           {
@@ -1366,7 +1412,14 @@
             "content": {
               "text/event-stream": {
                 "itemSchema": {
-                  "$ref": "#/components/schemas/EventEnvelope"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/EventEnvelope"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ReplayGap"
+                    }
+                  ]
                 }
               }
             },

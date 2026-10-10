@@ -115,10 +115,9 @@ class Chromium:
         os.dup2(from_child_w, 4)
         os.set_inheritable(3, True)
         os.set_inheritable(4, True)
-        # `--window-size` at launch is the only size this honours: headless
-        # ignores a later resize, and a device-metrics override leaves the page's
-        # own height alone, so both read the same number for a tall viewport and
-        # a short one.
+        # This sizes the browser window, including its chrome. Checks requiring
+        # exact CSS viewport dimensions set device metrics before navigation
+        # and verify the resulting dimensions independently.
         sizing = [f"--window-size={window_size[0]},{window_size[1]}"] if window_size else []
         self.process = subprocess.Popen(
             [

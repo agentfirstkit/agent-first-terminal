@@ -100,11 +100,11 @@ registry instead of opening a window on a machine nobody is looking at.
 `--mode window` leaves the variable untouched, so a value you exported yourself
 is never overwritten.
 
-Ending a session from the far end closes it exactly as closing the window does:
-the command exits, and with it whatever the PTY was running. If that program was
-a long-running agent, ending the session is what stops it. Usually that is
-precisely what the person meant — but it is one remote tap away, and it does not
-ask twice.
+Ending an owning `ui` command from the far end closes it exactly as closing its
+window does: the command exits, and with it whatever its PTYs were running. If
+that program was a long-running agent, ending the UI is what stops it. Usually
+that is precisely what the person meant — but it is one remote tap away, and it
+does not ask twice.
 
 ## Attaching to a runtime that is already running
 
@@ -112,12 +112,15 @@ A separate `afterminal api serve` can own the sessions, and a UI command can be
 pointed at it:
 
 ```sh
-afterminal ui --api-url http://127.0.0.1:9418 --session-id codex --mode window
+afterminal ui codex --api-url http://127.0.0.1:9418 --mode window
 ```
 
 Attach mode creates nothing — not the runtime, not the named session. The id
 selects an existing session; omit it to open the multi-session list. Several UI
 commands can attach at once, and the browser never receives the API credential.
+Ending an attached UI closes only that attachment; the remote runtime and its
+sessions keep running. Explicitly closing a terminal session through the UI or
+API is a separate action that stops that session's program.
 
 ## For callers that are programs
 
@@ -125,7 +128,9 @@ The same runtime is available over a bearer-protected HTTP API with a committed,
 drift-tested OpenAPI 3.2 contract: open and list sessions, read structured
 screens, write input, resize, close, deliver `interrupt`/`terminate`/`kill`, and
 watch every session's events on one SSE stream that resumes from
-`Last-Event-ID`. On Unix those are real signals, not control-character writes.
+`Last-Event-ID`. On Unix those are real signals, not control-character writes. On Windows, only
+`kill` is supported and terminates the process started for the session;
+`interrupt` and `terminate` return `signal_not_supported`.
 
 Domain responses are AFDATA envelopes and pass through AFDATA redaction on the
 way out. `/health`, `/openapi.json` and the schemas under `/schemas/` are public
@@ -144,21 +149,23 @@ brew install agentfirstkit/tap/afterminal   # macOS / Linux
 scoop bucket add agentfirstkit https://github.com/agentfirstkit/scoop-bucket && scoop install afterminal   # Windows
 
 # or from crates.io
-cargo install agent-first-terminal --locked --features api
+cargo install agent-first-terminal --locked
 ```
 
 Prebuilt archives are also available from
 [GitHub Releases](https://github.com/agentfirstkit/agent-first-terminal/releases).
 
-`cargo install agent-first-terminal` without `--features api` installs nothing,
-and says so while naming the flag, rather than leaving a working-looking install
-with no executable. Depending on this crate as a library needs no feature at
-all: the core has no async runtime and no HTTP dependency.
+A source install builds the same feature set as the published packages.
+Depending on this crate as a library wants `default-features = false`: the core
+has no async runtime and no HTTP dependency.
 
 ## CLI
 
-`afterminal` emits one AFDATA protocol event per run. JSON is the default; YAML
-and plain output are also available.
+Finite `afterminal` commands return a terminal AFDATA protocol event. `ui` and
+`api serve` emit an ordered event stream: first ready progress, then a terminal
+event when they stop. Parse events individually and use `kind` and the
+progress `phase` to distinguish readiness from completion. JSON is the default;
+YAML and plain output are also available.
 
 ```bash
 afterminal --version
@@ -187,7 +194,7 @@ current:
 
 ```bash
 afterminal skill install --agent all --scope workspace
-afterminal skill status
+afterminal skill status --agent all --scope workspace
 ```
 
 ## Replacing the terminal page

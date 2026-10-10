@@ -9,10 +9,12 @@ unset _AFDATA_BASH_SOURCE
 ROOT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_PATH"
 
-afdata_args_begin "$0 [MODE]"
+afdata_args_begin "$0 [MODE] [FILTER]"
 afdata_args_positional test_mode MODE "Test mode" optional
+afdata_args_positional test_filter FILTER "Optional unit test name filter" optional
 afdata_args_parse "$@"
 MODE="${test_mode:-all}"
+FILTER="${test_filter:-}"
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/agent-first-terminal-test.XXXXXX")"
 trap 'rm -rf "$TEST_TMP"' EXIT
 
@@ -42,7 +44,7 @@ check_openapi_contract() {
   local binary="$ROOT_PATH/target/debug/afterminal"
   local generated="$TEST_TMP/openapi"
 
-  afdata_run --quiet cargo build --features api --bin afterminal
+  afdata_run --quiet cargo build --bin afterminal
   afdata_run --quiet "$binary" api export --directory "$generated" --force
   # The whole generated tree is committed: the document, the Schema index, and
   # one file per Schema. A stale Schema file reads as current, so compare the
@@ -82,7 +84,7 @@ run_static() {
   # byte there, so this spore and its siblings cannot drift onto different rules.
   "$ROOT_PATH/scripts/install-shellcheck.sh" --check "$ROOT_PATH"
   afdata_run --quiet cargo fmt --all --check
-  run_clippy
+  run_clippy --no-default-features
   run_clippy --all-features
   check_minimal_dependency_tree
   check_openapi_contract
@@ -93,14 +95,20 @@ run_static() {
 }
 
 run_unit() {
-  afdata_run --quiet cargo test --all-features --lib --bins --tests
+  afdata_run --quiet python3 tests/browser_smoke_failure.py
+  if [[ -n "$FILTER" ]]; then
+    afdata_run --quiet cargo test --all-features --lib --bins --tests "$FILTER"
+  else
+    afdata_run --quiet cargo test --all-features --lib --bins --tests
+  fi
 }
 
 run_api_smoke() {
   local binary="$ROOT_PATH/target/debug/afterminal"
 
-  afdata_run --quiet cargo build --features api --bin afterminal
+  afdata_run --quiet cargo build --bin afterminal
   afdata_run --quiet python3 tests/api_smoke.py "$binary"
+  afdata_run --quiet python3 tests/shutdown_smoke.py "$binary"
 }
 
 # Drives the real `afterminal ui` window with a stub browser, so the page and
@@ -108,7 +116,7 @@ run_api_smoke() {
 run_ui_smoke() {
   local binary="$ROOT_PATH/target/debug/afterminal"
 
-  afdata_run --quiet cargo build --features api --bin afterminal
+  afdata_run --quiet cargo build --bin afterminal
   afdata_run --quiet python3 tests/ui_smoke.py "$binary"
 }
 
@@ -118,7 +126,7 @@ run_ui_smoke() {
 run_ui_delivery_smoke() {
   local binary="$ROOT_PATH/target/debug/afterminal"
 
-  afdata_run --quiet cargo build --features api --bin afterminal
+  afdata_run --quiet cargo build --bin afterminal
   afdata_run --quiet python3 tests/ui_delivery_smoke.py "$binary"
 }
 
@@ -132,14 +140,15 @@ run_ui_browser_smoke() {
   local binary="$ROOT_PATH/target/debug/afterminal"
   local script status
 
-  afdata_run --quiet cargo build --features api --bin afterminal
+  afdata_run --quiet cargo build --bin afterminal
   # The second one measures how much terminal a phone-shaped window leaves, and
   # runs a browser per shape because the size can only be set at launch.
   for script in tests/ui_browser_smoke.py tests/ui_viewport_smoke.py; do
     if python3 "$script" "$binary"; then
       continue
+    else
+      status=$?
     fi
-    status=$?
     if [ "$status" -eq 2 ]; then
       afdata_log warn "${script##*/} skipped: no Chromium on this machine"
       continue
@@ -153,7 +162,7 @@ run_minimal() {
 }
 
 run_release_smoke() {
-  afdata_run --quiet cargo build --release --features api --bin afterminal
+  afdata_run --quiet cargo build --release --bin afterminal
   afdata_run --quiet ./scripts/release-smoke.sh target/release
 }
 
@@ -166,7 +175,7 @@ case "$MODE" in
   all)           run_static; run_unit; run_minimal; run_api_smoke; run_ui_smoke; run_ui_delivery_smoke; run_ui_browser_smoke; run_release_smoke ;;
   *)
     afdata_error cli_error "unsupported test mode '$MODE'" \
-      "try: $0 static|unit|minimal|api|release-smoke|all" || :
+      "try: $0 static|unit|minimal|api|release-smoke|all [FILTER]" || :
     exit 2
     ;;
 esac

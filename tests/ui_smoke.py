@@ -213,7 +213,10 @@ def main() -> int:
             report = json.load(handle)
 
         app_url = report.get("app_url", "")
-        if not app_url.endswith("/"):
+        # The window key travels in the fragment; the page itself is the
+        # directory before it.
+        page_url, _, window_fragment = app_url.partition("#")
+        if not page_url.endswith("/"):
             raise RuntimeError(f"the window URL must end in a directory: {app_url!r}")
         if not report.get("page_has_title"):
             raise RuntimeError("the window did not receive the terminal page")
@@ -237,10 +240,12 @@ def main() -> int:
                 raise RuntimeError(f"the terminal page still owns UI transport: {forbidden}")
 
         # The URL carries the UI capability, so nothing may print it.
-        credential = app_url.rstrip("/").rsplit("/", 1)[-1]
+        credential = page_url.rstrip("/").rsplit("/", 1)[-1]
+        window_key = window_fragment.rpartition("=")[2]
         output = "\n".join(lines)
-        if credential and credential in output:
-            raise RuntimeError("the UI capability was emitted in ordinary output")
+        for secret in (credential, window_key):
+            if secret and secret in output:
+                raise RuntimeError("the UI capability was emitted in ordinary output")
         if not any(
             json.loads(line).get("kind") == "result"
             for line in lines

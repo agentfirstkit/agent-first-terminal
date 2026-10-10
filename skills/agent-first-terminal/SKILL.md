@@ -38,22 +38,23 @@ Commands started inside either remote delivery receive
 `AFUI_DELIVERY=session`, so their own UIs join the existing registry instead of
 opening a local window or advertising another link.
 
-The person who reaches a remote terminal can end it from there, exactly as if
-they had closed the window in the default mode. Ending it
-exits the command and kills whatever the PTY is running — including a
-long-running agent you started inside it. That is almost always what was
-wanted, but it happens on a single remote action, so do not treat an
-unexpected exit of a session you opened this way as a crash to diagnose before
-checking whether a person simply ended it.
+The person who reaches a remote terminal can end the UI from there, exactly as
+if they had closed the window in the default mode. For an owning `ui` command,
+ending the UI exits the command and kills its PTYs — including a long-running
+agent you started inside one. For `ui --api-url`, ending the UI only closes
+that attachment; the remote runtime and its sessions keep running. Explicitly
+closing a terminal session through the UI or API is a separate action that
+does stop that session's program. When an owning command exits unexpectedly,
+check whether a person ended its UI before treating the exit as a crash.
 
 - Treat stdout as the protocol: parse Agent-First Data events. Exit 2 means the
   invocation was rejected before anything ran and `error.code` is a `cli_*`
   code — retrying it unchanged cannot help. Exit 1 means the command ran and
   failed, with its own domain `error.code`.
-- Read the **screen**, not the byte stream. A VT snapshot is what a person would
-  see after the program finished redrawing; raw output still contains the cursor
-  moves and repaints that produced it. Scraping the stream reintroduces exactly
-  the ambiguity the snapshot removes.
+- Read the **screen**, not the byte stream. A VT snapshot shows the current
+  screen cells; raw output still contains the cursor moves and repaints that
+  produced them. Scraping the stream reintroduces exactly the ambiguity the
+  snapshot removes.
 - One session is one program's lifetime. Opening a second session to "retry"
   leaves the first one running and holding its PTY.
 
@@ -61,8 +62,12 @@ checking whether a person simply ended it.
 
 Terminal programs redraw. A snapshot taken the moment after a keystroke shows
 the state before the program reacted, and that is a real reading, not a stale
-one. When a result depends on the program having caught up, wait for the event
-that says so rather than sampling the screen in a loop and hoping.
+one. A `screen_changed` event means a new screen sequence is available; read
+the new snapshot, but do not treat that event as a redraw-completion signal.
+There is no settled event. To observe an output quiet period, wait for a
+bounded interval and read `activity.quiescent` and `activity.last_output_age_ms`
+from the screen snapshot. Quiescence only means output has been quiet; task
+completion still requires the program's own completion marker or status.
 
 ## Input leases: the human wins
 
@@ -97,16 +102,20 @@ limit: a person is deliberately entering something you must not see.
   you hit a password prompt, or you are asking them to paste a key — start
   secret input first and say so. Being wrong costs a few seconds of withheld
   output; being wrong the other way puts their secret in a stream.
-- What is on screen after the window closes is visible again. If a secret is
-  still displayed, that is content the person can see too — say so rather than
-  reading it back to them.
+- After the window closes, the screen starts blank and contains only new
+  output. Terminal modes are preserved, but the earlier picture is discarded.
+  Ask the program to redraw (for example, Ctrl-L) when a full picture is needed.
 
-## Signals go to the foreground process group
+## Signals and platform boundaries
 
-Interrupting means signalling the group the terminal is actually running, not
+On Unix, interrupting means signalling the group the terminal is actually running, not
 the session host. Send the signal and then read the screen to learn what it did:
 a program may trap, prompt, or ignore it. Treating "signal sent" as "program
 stopped" is how a task reports success against something still running.
+
+On Windows, only `kill` is supported: it terminates the process started for
+the session, rather than the foreground process group. `interrupt` and
+`terminate` return `signal_not_supported`.
 
 ## Recovery
 
@@ -122,6 +131,6 @@ stopped" is how a task reports success against something still running.
 ## Setup Checklist
 
 ```bash
-afterminal --version || cargo install agent-first-terminal --locked --features api
+afterminal --version || cargo install agent-first-terminal --locked
 afterminal skill install       # installs this skill for codex, claude-code, opencode, hermes
 ```

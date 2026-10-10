@@ -28,7 +28,7 @@ fi
 if [ ! -x "$AFTERMINAL" ]; then
   afdata_error release_binary_missing \
     "missing afterminal binary under $BIN_DIR" \
-    "build with --features api --bin afterminal before running the release smoke" || :
+    "build with --bin afterminal before running the release smoke" || :
   exit 1
 fi
 

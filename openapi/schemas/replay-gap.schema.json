@@ -1,0 +1,49 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afterminal/v1/replay-gap.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Data for the named replay_gap SSE event. This notice has no SSE id and does not advance the global terminal event sequence.",
+  "properties": {
+    "last_event_id": {
+      "description": "The supplied cursor, or null when it is not a valid unsigned decimal sequence",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "latest_seq": {
+      "description": "Latest global terminal event sequence at the same instant as the retained backlog snapshot",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "oldest_seq": {
+      "description": "First retained terminal event sequence, or null when the backlog is empty",
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "reason": {
+      "enum": [
+        "invalid_last_event_id",
+        "last_event_id_too_old",
+        "last_event_id_ahead"
+      ],
+      "type": "string"
+    },
+    "type": {
+      "const": "replay_gap"
+    }
+  },
+  "required": [
+    "type",
+    "reason",
+    "last_event_id",
+    "oldest_seq",
+    "latest_seq"
+  ],
+  "title": "ReplayGap",
+  "type": "object"
+}

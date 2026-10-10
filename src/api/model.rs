@@ -474,6 +474,43 @@ impl From<EventEnvelope> for EventEnvelopeResult {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReplayGapReason {
+    InvalidLastEventId,
+    LastEventIdTooOld,
+    LastEventIdAhead,
+}
+
+/// A subscription-level notice, sent as the named SSE event `replay_gap`.
+/// Terminal events retain their existing envelope and global sequence.
+#[derive(Debug, Serialize)]
+pub(crate) struct ReplayGapResult {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    pub reason: ReplayGapReason,
+    pub last_event_id: Option<u64>,
+    pub oldest_seq: Option<u64>,
+    pub latest_seq: u64,
+}
+
+impl ReplayGapResult {
+    pub(crate) fn new(
+        reason: ReplayGapReason,
+        last_event_id: Option<u64>,
+        oldest_seq: Option<u64>,
+        latest_seq: u64,
+    ) -> Self {
+        Self {
+            event_type: "replay_gap",
+            reason,
+            last_event_id,
+            oldest_seq,
+            latest_seq,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum EventResult {
     SessionOpened,

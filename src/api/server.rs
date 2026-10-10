@@ -18,13 +18,14 @@ use axum::{Json, Router};
 use base64::Engine;
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::{ReceiverStream, WatchStream};
 
 use super::model::{
     AcquireInputLeaseRequest, ActorKindName, ActorModel, EventEnvelopeResult, HealthResult,
-    InputAck, InputLeaseListResult, InputLeaseResult, OpenSessionRequest, ResizeRequest,
-    ScreenResult, SecretInputActionRequest, SecretInputResult, SendInputRequest, SendSignalRequest,
-    SessionInfo, SessionListResult, SignalAck,
+    InputAck, InputLeaseListResult, InputLeaseResult, OpenSessionRequest, ReplayGapReason,
+    ReplayGapResult, ResizeRequest, ScreenResult, SecretInputActionRequest, SecretInputResult,
+    SendInputRequest, SendSignalRequest, SessionInfo, SessionListResult, SignalAck,
 };
 use super::schema::{openapi_document, schema_index, standalone_schemas};
 use super::ui;
@@ -48,6 +49,7 @@ pub struct ApiState {
     /// so one of them has to be installed after construction rather than
     /// before. This is that one, and `router` is the only place that fills it.
     ui_access: Arc<OnceLock<UiMountAccess>>,
+    event_streams_stopped: tokio::sync::watch::Sender<bool>,
 }
 
 struct ApiFailure {
@@ -178,7 +180,16 @@ impl ApiState {
             manager: Arc::new(Mutex::new(manager)),
             access_token_secret: Arc::new(access_token_secret.into_bytes()),
             ui_access: Arc::new(OnceLock::new()),
+            event_streams_stopped: tokio::sync::watch::channel(false).0,
         }
+    }
+
+    /// End event responses before draining the HTTP server on shutdown.
+    ///
+    /// Closing the response also releases a producer blocked on its bounded
+    /// queue, including when a connected client has stopped reading events.
+    pub fn stop_event_streams(&self) {
+        self.event_streams_stopped.send_replace(true);
     }
 
     /// The credentials this API issues against its own `/ui` mount, once
@@ -460,26 +471,34 @@ async fn send_input(
             format!("decoded input exceeds {MAX_INPUT_BYTES} bytes"),
         );
     }
-    let mut manager = match lock_manager(started, &state) {
-        Ok(manager) => manager,
-        Err(error) => return error.into_response(),
-    };
     let actor = InputActor::from(request.actor);
-    match manager.write_as(
-        &session_id,
-        actor.clone(),
-        request.lease_id.as_deref(),
-        &bytes,
-    ) {
-        Ok(()) => result_response(
+    let prepared = {
+        let mut manager = match lock_manager(started, &state) {
+            Ok(manager) => manager,
+            Err(error) => return error.into_response(),
+        };
+        match manager.prepare_write_as(&session_id, actor.clone(), request.lease_id.as_deref()) {
+            Ok(prepared) => prepared,
+            Err(error) => return terminal_error(started, error),
+        }
+    };
+    let input_bytes = bytes.len();
+    // The PTY can stop reading indefinitely. Keep its write off the async
+    // worker and outside the manager lock so other sessions remain usable.
+    match tokio::task::spawn_blocking(move || prepared.write(&bytes)).await {
+        Ok(Ok(())) => result_response(
             started,
             &InputAck {
                 accepted: true,
-                input_bytes: bytes.len(),
+                input_bytes,
                 actor: actor.into(),
             },
         ),
-        Err(error) => terminal_error(started, error),
+        Ok(Err(error)) => terminal_error(started, error),
+        Err(error) => terminal_error(
+            started,
+            TerminalError::Backend(format!("terminal input task failed: {error}")),
+        ),
     }
 }
 
@@ -656,11 +675,6 @@ async fn close_session(State(state): State<ApiState>, Path(session_id): Path<Str
 
 async fn stream_events(State(state): State<ApiState>, headers: HeaderMap) -> Response {
     let started = Instant::now();
-    let last_event_id = headers
-        .get(&LAST_EVENT_ID)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
     let subscription = {
         let manager = match lock_manager(started, &state) {
             Ok(manager) => manager,
@@ -668,8 +682,19 @@ async fn stream_events(State(state): State<ApiState>, headers: HeaderMap) -> Res
         };
         manager.subscribe_events()
     };
+    let oldest_seq = subscription.backlog.first().map(|envelope| envelope.seq);
+    let (last_event_id, replay_gap) = replay_cursor(
+        headers.get(&LAST_EVENT_ID),
+        oldest_seq,
+        subscription.latest_seq,
+    );
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<SseEvent, Infallible>>(128);
     tokio::task::spawn_blocking(move || {
+        if let Some(gap) = replay_gap
+            && !send_replay_gap(&sender, gap)
+        {
+            return;
+        }
         for envelope in subscription
             .backlog
             .into_iter()
@@ -695,13 +720,77 @@ async fn stream_events(State(state): State<ApiState>, headers: HeaderMap) -> Res
         }
     });
 
-    Sse::new(ReceiverStream::new(receiver))
+    let stopped = WatchStream::new(state.event_streams_stopped.subscribe())
+        .filter_map(|stopped| stopped.then_some(None));
+    let stream = ReceiverStream::new(receiver)
+        .map(Some)
+        .merge(stopped)
+        .take_while(Option::is_some)
+        .filter_map(|event| event);
+    Sse::new(stream)
         .keep_alive(
             KeepAlive::new()
                 .interval(Duration::from_secs(15))
                 .text("keep-alive"),
         )
         .into_response()
+}
+
+/// A missing cursor starts with the retained backlog. A supplied cursor that
+/// cannot resume it reports the gap and starts with that same backlog, rather
+/// than silently treating a truncated history as complete.
+fn replay_cursor(
+    header: Option<&HeaderValue>,
+    oldest_seq: Option<u64>,
+    latest_seq: u64,
+) -> (u64, Option<ReplayGapResult>) {
+    let Some(header) = header else {
+        return (0, None);
+    };
+    let last_event_id = header.to_str().ok().and_then(|value| {
+        // The public header grammar is decimal digits, not Rust's permissive
+        // integer grammar (which also admits a leading plus sign).
+        (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| value.parse::<u64>().ok())
+            .flatten()
+    });
+    let reason = match last_event_id {
+        None => Some(ReplayGapReason::InvalidLastEventId),
+        Some(last) if last > latest_seq => Some(ReplayGapReason::LastEventIdAhead),
+        Some(last) if oldest_seq.is_some_and(|oldest| last < oldest.saturating_sub(1)) => {
+            Some(ReplayGapReason::LastEventIdTooOld)
+        }
+        Some(_) => None,
+    };
+    match reason {
+        Some(reason) => (
+            0,
+            Some(ReplayGapResult::new(
+                reason,
+                last_event_id,
+                oldest_seq,
+                latest_seq,
+            )),
+        ),
+        None => (last_event_id.unwrap_or(0), None),
+    }
+}
+
+fn send_replay_gap(
+    sender: &tokio::sync::mpsc::Sender<Result<SseEvent, Infallible>>,
+    gap: ReplayGapResult,
+) -> bool {
+    let Ok(payload) = serde_json::to_value(gap) else {
+        return false;
+    };
+    let Ok(data) = serde_json::to_string(&agent_first_data::redacted_value(&payload)) else {
+        return false;
+    };
+    // This describes the subscription, not a terminal event. It has no global
+    // sequence to acknowledge and must not change the client's Last-Event-ID.
+    sender
+        .blocking_send(Ok(SseEvent::default().event("replay_gap").data(data)))
+        .is_ok()
 }
 
 /// One stream item, described by the operation's `itemSchema`.
@@ -939,6 +1028,15 @@ pub(super) fn terminal_error(started: Instant, error: TerminalError) -> Response
             ),
         )
         .hint("only a human actor ends secret input mode; ask the person at the terminal")
+        .into_response(),
+        TerminalError::InputInProgress { session_id } => ApiFailure::new(
+            started,
+            StatusCode::CONFLICT,
+            "input_in_progress",
+            format!("terminal session `{session_id}` is still writing input"),
+        )
+        .retryable()
+        .hint("retry changing secret input mode after the input write completes")
         .into_response(),
         TerminalError::SecretInputSettling {
             session_id,
@@ -1828,6 +1926,360 @@ mod tests {
 
         let closed = call_empty(&app, "DELETE", &format!("/v1/sessions/{session_id}")).await;
         assert_eq!(closed.0, StatusCode::NO_CONTENT);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_blocked_http_input_keeps_the_async_worker_and_other_sessions_available() {
+        use std::io::{self, Write};
+        use std::sync::{Arc, Mutex, mpsc};
+
+        struct BlockedWriter {
+            entered: Arc<tokio::sync::Notify>,
+            release: mpsc::Receiver<()>,
+        }
+
+        impl Write for BlockedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.entered.notify_one();
+                self.release
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::TimedOut, "test PTY write was not released")
+                    })?;
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let state = ApiState::new(TOKEN.to_string());
+        let app = test_router(state.clone());
+        for session_id in ["api_blocked", "api_available"] {
+            let opened = call_json(
+                &app,
+                "POST",
+                "/v1/sessions",
+                json!({
+                    "session_id": session_id,
+                    "program": test_shell::program(),
+                    "args": test_shell::args(),
+                }),
+            )
+            .await;
+            assert_eq!(opened.0, StatusCode::OK, "{}", opened.1);
+        }
+        let lease_id = lease_for(&app, "api_blocked", "controller").await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (release, receiver) = mpsc::channel();
+        {
+            let mut manager = state.manager.lock().expect("manager lock");
+            manager
+                .sessions
+                .get_mut("api_blocked")
+                .expect("session")
+                .writer = Arc::new(Mutex::new(Box::new(BlockedWriter {
+                entered: Arc::clone(&entered),
+                release: receiver,
+            })));
+        }
+        let input_app = app.clone();
+        let input = tokio::spawn(async move {
+            call_json(
+                &input_app,
+                "POST",
+                "/v1/sessions/api_blocked/input",
+                json!({
+                    "actor": {"kind": "controller", "id": "controller"},
+                    "lease_id": lease_id,
+                    "data_base64": base64::engine::general_purpose::STANDARD
+                        .encode(vec![b'x'; super::MAX_INPUT_BYTES]),
+                }),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("HTTP input reaches the blocked writer");
+        // This test has a single async worker. A synchronous PTY write on it
+        // would have to finish before this continuation could run at all.
+        assert!(!input.is_finished(), "the PTY write must still be blocked");
+        let screen = tokio::time::timeout(
+            Duration::from_secs(2),
+            call_empty(&app, "GET", "/v1/sessions/api_available/screen"),
+        )
+        .await;
+        let closed = tokio::time::timeout(
+            Duration::from_secs(2),
+            call_empty(&app, "DELETE", "/v1/sessions/api_available"),
+        )
+        .await;
+        // Release before assertions so a regression does not leave a blocking
+        // task waiting while the test runtime shuts down.
+        let _released = release.send(());
+        let accepted = tokio::time::timeout(Duration::from_secs(5), input)
+            .await
+            .expect("released input finishes")
+            .expect("input task");
+        assert_eq!(
+            screen.expect("other session's screen remains available").0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            closed
+                .expect("other session closes while input is blocked")
+                .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(accepted.0, StatusCode::OK, "{}", accepted.1);
+        assert_eq!(accepted.1["input_bytes"], super::MAX_INPUT_BYTES);
+        assert_eq!(
+            call_empty(&app, "DELETE", "/v1/sessions/api_blocked")
+                .await
+                .0,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    /// Drive the real event bus without a PTY reader racing the subscription's
+    /// bounds. The route still uses the bounded backlog and live receiver.
+    fn replay_state(event_count: usize) -> ApiState {
+        let state = ApiState::new(TOKEN.to_string());
+        {
+            let manager = state.manager.lock().expect("manager lock");
+            let mut events = manager.events.lock().expect("event bus");
+            for _ in 0..event_count {
+                events.emit(
+                    "api_replay".to_string(),
+                    crate::TerminalEvent::Resized { rows: 24, cols: 80 },
+                );
+            }
+        }
+        state
+    }
+
+    #[tokio::test]
+    async fn stopping_event_streams_ends_idle_and_backpressured_responses() {
+        for count in [0, crate::EVENT_BACKLOG_CAPACITY] {
+            let state = replay_state(count);
+            let app = test_router(state.clone());
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/events")
+                        .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            state.stop_event_streams();
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                to_bytes(response.into_body(), usize::MAX),
+            )
+            .await
+            .expect("shutdown ends the SSE response")
+            .expect("SSE response bytes");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_open_event_response_does_not_block_graceful_server_shutdown() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("loopback listener");
+        let address = listener.local_addr().expect("loopback address");
+        let state = replay_state(1);
+        let app = test_router(state.clone());
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let served = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _stopped = stopped.await;
+                    state.stop_event_streams();
+                })
+                .await
+        });
+        // Building a client loads the platform's root certificates, which on
+        // a loaded Windows host can take longer than the whole budget below.
+        // The header wait is only a hang guard; the shutdown wait is the
+        // property under test and keeps its tight budget.
+        let client = reqwest::Client::new();
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            client
+                .get(format!("http://{address}/v1/events"))
+                .bearer_auth(TOKEN)
+                .send(),
+        )
+        .await
+        .expect("SSE response headers arrive")
+        .expect("SSE request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        stop.send(()).expect("start shutdown");
+        tokio::time::timeout(Duration::from_secs(2), served)
+            .await
+            .expect("the still-connected SSE client must not hold server shutdown")
+            .expect("server task completes")
+            .expect("graceful server shutdown succeeds");
+        drop(response);
+    }
+
+    async fn replay_frames(
+        app: &axum::Router,
+        last_event_id: Option<&str>,
+        count: usize,
+    ) -> Vec<String> {
+        use tokio_stream::StreamExt;
+
+        let mut request = Request::builder()
+            .uri("/v1/events")
+            .header(AUTHORIZATION, format!("Bearer {TOKEN}"));
+        if let Some(last_event_id) = last_event_id {
+            request = request.header("last-event-id", last_event_id);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut received = String::new();
+        loop {
+            let frame = tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .expect("SSE frames arrive")
+                .expect("SSE stream remains open")
+                .expect("SSE frame bytes");
+            received.push_str(&String::from_utf8_lossy(&frame));
+            let frames: Vec<_> = received
+                .split("\n\n")
+                .take(received.split("\n\n").count().saturating_sub(1))
+                .filter(|frame| !frame.is_empty())
+                .take(count)
+                .map(str::to_owned)
+                .collect();
+            if frames.len() == count {
+                return frames;
+            }
+        }
+    }
+
+    fn sse_payload(frame: &str) -> Value {
+        let data = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap_or_else(|| panic!("SSE frame has no data: {frame}"));
+        serde_json::from_str(data).expect("SSE data is JSON")
+    }
+
+    fn assert_gap(frame: &str, expected: Value) {
+        assert!(
+            frame.lines().any(|line| line == "event: replay_gap"),
+            "{frame}"
+        );
+        assert!(
+            !frame.lines().any(|line| line.starts_with("id:")),
+            "a gap must not acknowledge a global terminal event: {frame}"
+        );
+        assert_eq!(sse_payload(frame), expected);
+    }
+
+    #[tokio::test]
+    async fn an_event_cursor_before_the_retained_window_reports_a_gap_then_replays() {
+        let count = crate::EVENT_BACKLOG_CAPACITY + 2;
+        let app = test_router(replay_state(count));
+        let frames = replay_frames(&app, Some("1"), 2).await;
+        assert_gap(
+            &frames[0],
+            json!({
+                "type": "replay_gap",
+                "reason": "last_event_id_too_old",
+                "last_event_id": 1,
+                "oldest_seq": 3,
+                "latest_seq": count,
+            }),
+        );
+        assert_eq!(sse_payload(&frames[1])["seq"], 3);
+        assert!(frames[1].lines().any(|line| line == "id: 3"));
+        assert_eq!(sse_payload(&frames[1])["session_id"], "api_replay");
+    }
+
+    #[tokio::test]
+    async fn an_event_cursor_ahead_of_the_stream_reports_a_gap_then_replays() {
+        let app = test_router(replay_state(3));
+        let frames = replay_frames(&app, Some("4"), 2).await;
+        assert_gap(
+            &frames[0],
+            json!({
+                "type": "replay_gap",
+                "reason": "last_event_id_ahead",
+                "last_event_id": 4,
+                "oldest_seq": 1,
+                "latest_seq": 3,
+            }),
+        );
+        assert_eq!(sse_payload(&frames[1])["seq"], 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_event_cursors_report_a_gap_instead_of_silently_becoming_zero() {
+        let app = test_router(replay_state(3));
+        for cursor in ["invalid", "", "+1", "-1", "18446744073709551616"] {
+            let frames = replay_frames(&app, Some(cursor), 2).await;
+            assert_gap(
+                &frames[0],
+                json!({
+                    "type": "replay_gap",
+                    "reason": "invalid_last_event_id",
+                    "last_event_id": null,
+                    "oldest_seq": 1,
+                    "latest_seq": 3,
+                }),
+            );
+            assert_eq!(sse_payload(&frames[1])["seq"], 1, "cursor: {cursor:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_replay_boundary_and_a_missing_cursor_keep_normal_event_shapes() {
+        let count = crate::EVENT_BACKLOG_CAPACITY + 2;
+        let app = test_router(replay_state(count));
+        for cursor in [None, Some("2")] {
+            let frames = replay_frames(&app, cursor, 1).await;
+            assert_eq!(
+                sse_payload(&frames[0]),
+                json!({
+                    "seq": 3,
+                    "session_id": "api_replay",
+                    "event": {"type": "resized", "rows": 24, "cols": 80},
+                }),
+                "cursor: {cursor:?}"
+            );
+            assert!(!frames[0].contains("event: replay_gap"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_future_cursor_on_an_empty_stream_reports_empty_snapshot_bounds() {
+        let app = test_router(replay_state(0));
+        let frames = replay_frames(&app, Some("1"), 1).await;
+        assert_gap(
+            &frames[0],
+            json!({
+                "type": "replay_gap",
+                "reason": "last_event_id_ahead",
+                "last_event_id": 1,
+                "oldest_seq": null,
+                "latest_seq": 0,
+            }),
+        );
     }
 
     async fn fetch_public(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
