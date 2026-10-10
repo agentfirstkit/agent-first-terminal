@@ -659,8 +659,28 @@ def main() -> int:
             time.sleep(0.2)
             chromium.press_enter(page)
             time.sleep(1.0)
+            # The key bar opens by itself only on a narrow or touch screen;
+            # anywhere else a person opens it, so do the same.
+            key_bar_hidden = chromium.call(
+                "Runtime.evaluate",
+                {"expression": "document.querySelector('#key-bar').hidden",
+                 "returnByValue": True},
+                session=page,
+            )["result"]["value"]
+            if key_bar_hidden:
+                click_element(chromium, page, "#key-bar-toggle")
+                time.sleep(0.3)
             click_element(chromium, page, "[data-key='ctrl']")
             time.sleep(0.3)
+            armed = chromium.call(
+                "Runtime.evaluate",
+                {"expression": "document.querySelector(\"[data-key='ctrl']\")"
+                               ".getAttribute('aria-pressed')",
+                 "returnByValue": True},
+                session=page,
+            )["result"]["value"]
+            if armed != "true":
+                raise RuntimeError(f"Ctrl on the key bar did not arm (aria-pressed {armed!r})")
             chromium.call("Input.insertText", {"text": "c"}, session=page)
             time.sleep(1.2)
             chromium.call("Input.insertText", {"text": "echo interrupted-ok"}, session=page)
